@@ -127,6 +127,7 @@ def main() -> None:
         "c3uy-2p5r",
         DATA_DIR / "air_quality_health.csv",
         "NYC Air Quality & Health",
+        limit=25_000,  # dataset has ~19,827 rows; 25k ensures we get all of them
     )
     fetch_nyc_open_data(
         "ebe7-6eah",
