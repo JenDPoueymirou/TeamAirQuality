@@ -1,0 +1,21 @@
+# Environment
+.env
+
+# Data and vector store (gitignored — populated at runtime)
+backend/data/
+backend/logs/
+**/.chroma/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
