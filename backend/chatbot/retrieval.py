@@ -25,6 +25,23 @@ from chatbot.config import (
 
 log = logging.getLogger(__name__)
 
+# Module-level state — populated once at startup by init_retrieval().
+_df: pd.DataFrame = pd.DataFrame()
+_collection = None
+_embed_model = None
+
+
+def init_retrieval(df: pd.DataFrame, collection, embed_model) -> None:
+    """
+    Store the data dependencies in module state.
+    Called once from main.py lifespan so the chat endpoint can call
+    retrieve(query) without threading these objects through every layer.
+    """
+    global _df, _collection, _embed_model
+    _df = df
+    _collection = collection
+    _embed_model = embed_model
+
 
 # ── Intent extraction ──────────────────────────────────────────────────────────
 
