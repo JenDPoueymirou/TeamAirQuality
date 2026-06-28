@@ -1,121 +1,127 @@
-import csv
-import logging
-from contextlib import asynccontextmanager
-from datetime import date, datetime
-from pathlib import Path
+"""
+main.py
+-------
+FastAPI application for the NYC Pollution Chatbot.
+Restructured to use Google Gemini 2.0 Flash (free tier)
+instead of OpenRouter.
 
-import chromadb
+Key difference from OpenRouter version:
+  - Uses google-genai SDK instead of openai SDK
+  - Gemini uses generate_content() not chat.completions.create()
+  - System prompt passed as system_instruction parameter
+  - History formatted as Content objects not role/content dicts
+  - Free tier: 1,500 requests/day vs OpenRouter's 200/day
+"""
+
+import csv
+import os
+from datetime import date, datetime
+from contextlib import asynccontextmanager
+
 import pandas as pd
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
-from pydantic import BaseModel, Field
+import chromadb
+from google import genai
+from google.genai import types
 from sentence_transformers import SentenceTransformer
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from chatbot.config import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    LLM_MAX_TOKENS,
+    EMBED_MODEL,
+    CSV_PATH,
     CHROMA_DIR,
     COLLECTION_NAME,
-    CSV_PATH,
     DAILY_REQUEST_LIMIT,
-    EMBED_MODEL,
-    LLM_FALLBACK,
-    LLM_MODEL,
-    LOGS_PATH,
-    OPENROUTER_API_KEY,
-    OPENROUTER_BASE_URL,
-    RATE_WARN_THRESHOLD,
-    validate_config,
+    RATE_LIMIT_WARNING_THRESHOLD,
 )
-from chatbot.prompt import build_messages, build_system_prompt
 from chatbot.retrieval import init_retrieval, retrieve
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(__name__)
-
-# ── Module-level state (populated by lifespan) ─────────────────────────────────
-
-df: pd.DataFrame = pd.DataFrame()
-collection: chromadb.Collection | None = None
-embed_model: SentenceTransformer | None = None
-oai_client: OpenAI | None = None
+from chatbot.prompt import build_system_prompt
 
 
-# ── Lifespan ───────────────────────────────────────────────────────────────────
+# ── Shared state ───────────────────────────────────────────────────────────────
+
+df: pd.DataFrame | None = None
+gemini_client: genai.Client | None = None
+LOG_PATH = "logs/usage.csv"
+LOG_HEADERS = [
+    "timestamp", "question_length", "model_used",
+    "input_tokens", "output_tokens",
+    "rows_retrieved", "filters_applied",
+]
+
+
+# ── Startup ────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global df, collection, embed_model, oai_client
+    global df, gemini_client
 
-    log.info("=" * 55)
-    log.info("  NYC Pollution Chatbot -- starting up")
-    log.info("=" * 55)
+    print("\n── Starting NYC Pollution Chatbot (Gemini) ─────────────────")
 
-    for w in validate_config():
-        log.warning("CONFIG: %s", w)
-
-    # 1. Load CSV — hard failure if pipeline hasn't been run
-    if not Path(CSV_PATH).exists():
+    # 1. Load CSV
+    print(f"[startup] Loading dataset from {CSV_PATH}...")
+    if not os.path.exists(CSV_PATH):
         raise RuntimeError(
-            f"CSV not found at {CSV_PATH!r}. "
-            "Run src/datamerge.py before starting the server."
+            f"CSV not found at {CSV_PATH}. "
+            "Run src/dataingestion.py and src/datamerge.py first."
         )
     df = pd.read_csv(CSV_PATH)
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    log.info("CSV loaded -- %d rows from %s", len(df), CSV_PATH)
+    print(f"[startup] Loaded {len(df)} rows, {len(df.columns)} columns")
 
-    # 2. Connect ChromaDB — hard failure if ingest hasn't been run
-    if not Path(CHROMA_DIR).exists():
+    # 2. Connect to ChromaDB
+    print(f"[startup] Connecting to ChromaDB at {CHROMA_DIR}...")
+    if not os.path.exists(CHROMA_DIR):
         raise RuntimeError(
-            f"Chroma store not found at {CHROMA_DIR!r}. "
-            "Run src/ingest.py before starting the server."
+            f"ChromaDB not found at {CHROMA_DIR}. "
+            "Run src/ingest.py first."
         )
     chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
     collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
-    log.info("ChromaDB loaded -- %d vectors", collection.count())
+    print(f"[startup] ChromaDB ready — {collection.count()} vectors")
 
-    # 3. Load embedding model (~80 MB on first run, cached after)
-    try:
-        log.info("Loading embedding model %r ...", EMBED_MODEL)
-        embed_model = SentenceTransformer(EMBED_MODEL)
-        log.info("Embedding model ready")
-    except Exception as exc:
-        log.warning("Embedding model failed: %s -- semantic search disabled", exc)
+    # 3. Load embedding model
+    print(f"[startup] Loading embedding model '{EMBED_MODEL}'...")
+    embed_model = SentenceTransformer(EMBED_MODEL)
+    print("[startup] Embedding model ready")
 
-    # 4. Wire retrieval module with all three dependencies
+    # 4. Wire retrieval layer
     init_retrieval(df, collection, embed_model)
+    print("[startup] Retrieval layer initialized")
 
-    # 5. Initialize OpenRouter / OpenAI client (used by /chat)
-    if OPENROUTER_API_KEY:
-        oai_client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
-        log.info("OpenAI client pointed at %s", OPENROUTER_BASE_URL)
-    else:
-        log.warning("OPENROUTER_API_KEY not set -- /chat will be disabled until key is added")
+    # 5. Initialize Gemini client
+    if not GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY not found. "
+            "Get a free key at aistudio.google.com and add it to .env"
+        )
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    print(f"[startup] Gemini client ready — model: {GEMINI_MODEL}")
 
     # 6. Ensure logs directory exists
-    Path(LOGS_PATH).parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
+    if not os.path.exists(LOG_PATH):
+        with open(LOG_PATH, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(LOG_HEADERS)
+    print(f"[startup] Usage log at {LOG_PATH}")
 
-    log.info("=" * 55)
-    log.info("  Startup complete -- http://localhost:8000/docs")
-    log.info("=" * 55)
+    print("── Ready. Server is accepting requests ─────────────────────\n")
 
     yield
 
-    log.info("Shutting down.")
+    print("\n[shutdown] Server stopping.")
 
 
-# ── App ────────────────────────────────────────────────────────────────────────
+# ── App instance ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="NYC Pollution Chatbot API",
-    description=(
-        "Grounded AI chatbot over the NYC Air Pollution & Disease dataset "
-        "(2005-2024, 5 boroughs, 2,171 rows). Free stack: OpenRouter + "
-        "sentence-transformers + ChromaDB."
-    ),
+    description="Grounded AI chatbot over the NYC Air Pollution & Disease dataset",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -128,11 +134,11 @@ app.add_middleware(
 )
 
 
-# ── Request / Response models ──────────────────────────────────────────────────
+# ── Pydantic models ────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=500)
-    history: list[dict] = Field(default_factory=list, max_length=10)
+    history: list[dict] = Field(default=[], max_length=10)
 
 
 class ChatResponse(BaseModel):
@@ -142,187 +148,235 @@ class ChatResponse(BaseModel):
     rows_retrieved: int
 
 
-# ── LLM helpers ───────────────────────────────────────────────────────────────
+# ── LLM call ──────────────────────────────────────────────────────────────────
 
-def call_llm(messages: list[dict]) -> tuple[str, str, dict]:
+def call_llm(
+    system_prompt: str,
+    history: list[dict],
+    user_message: str,
+) -> tuple[str, str, dict]:
     """
-    Try primary model first; on 429 or 503 retry once with the fallback model.
-    Raises HTTP 503 if both models fail.
+    Call Gemini 2.0 Flash with the grounded system prompt and conversation.
 
-    Note: OpenRouter free models sometimes omit usage counts in their response.
-    Treat missing prompt_tokens / completion_tokens as 0 rather than crashing —
-    known limitation of the free tier.
+    Gemini SDK differences from OpenRouter/OpenAI:
+      - System prompt goes in system_instruction, not as a message
+      - History is formatted as types.Content objects
+      - Response text is at response.text
+      - Token counts at response.usage_metadata
     """
-    if oai_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM not configured -- set OPENROUTER_API_KEY in .env",
+    # Convert history to Gemini Content format
+    # Gemini uses "user" and "model" roles (not "assistant")
+    gemini_history = []
+    for turn in history:
+        role = turn.get("role", "")
+        content = turn.get("content", "")
+        # Map "assistant" → "model" for Gemini's role convention
+        gemini_role = "model" if role == "assistant" else "user"
+        gemini_history.append(
+            types.Content(
+                role=gemini_role,
+                parts=[types.Part(text=content)]
+            )
         )
 
-    last_exc: Exception | None = None
-
-    for model in (LLM_MODEL, LLM_FALLBACK):
-        try:
-            resp = oai_client.chat.completions.create(
-                model=model,
-                messages=messages,
-            )
-            answer = resp.choices[0].message.content or ""
-            usage = {
-                "prompt_tokens":     (resp.usage.prompt_tokens     or 0) if resp.usage else 0,
-                "completion_tokens": (resp.usage.completion_tokens or 0) if resp.usage else 0,
-            }
-            log.info("LLM responded via %s", model)
-            return answer, model, usage
-        except Exception as exc:
-            status = getattr(exc, "status_code", None)
-            if status in (429, 503):
-                log.warning("Model %s returned %s -- trying fallback", model, status)
-                last_exc = exc
-                continue
-            log.error("LLM call failed: %s", exc)
-            raise HTTPException(status_code=502, detail=f"LLM error: {exc}") from exc
-
-    raise HTTPException(
-        status_code=503,
-        detail="Both LLM models are unavailable. Try again later.",
+    # Add current user message
+    gemini_history.append(
+        types.Content(
+            role="user",
+            parts=[types.Part(text=user_message)]
+        )
     )
+
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=gemini_history,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=LLM_MAX_TOKENS,
+                temperature=0.2,   # lower = more factual, less creative
+            ),
+        )
+
+        answer = response.text
+        usage = {
+            "input_tokens":  getattr(response.usage_metadata, "prompt_token_count",     0) or 0,
+            "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0) or 0,
+        }
+        return answer, GEMINI_MODEL, usage
+
+    except Exception as e:
+        error_str = str(e).lower()
+        if "quota" in error_str or "429" in error_str or "rate" in error_str:
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini free tier rate limit hit. "
+                       "You have 15 requests/minute and 1,500/day. "
+                       "Wait a moment and try again."
+            )
+        raise HTTPException(status_code=500, detail=f"Gemini error: {e}")
+
+
+# ── Logging helpers ────────────────────────────────────────────────────────────
+
+def get_today_count() -> int:
+    today = date.today().isoformat()
+    count = 0
+    try:
+        with open(LOG_PATH, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("timestamp", "").startswith(today):
+                    count += 1
+    except FileNotFoundError:
+        pass
+    return count
 
 
 def log_request(
-    question_length: int,
-    model_used: str,
-    input_tokens: int,
-    output_tokens: int,
+    question: str,
+    model: str,
+    usage: dict,
     rows_retrieved: int,
-    filters_applied: dict,
+    filters: dict,
 ) -> None:
-    log_path = Path(LOGS_PATH)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    row = {
-        "timestamp":       datetime.now().isoformat(),
-        "question_length": question_length,
-        "model_used":      model_used,
-        "input_tokens":    input_tokens,
-        "output_tokens":   output_tokens,
-        "rows_retrieved":  rows_retrieved,
-        "filters_applied": str(filters_applied),
-    }
-
-    write_header = not log_path.exists()
-    with log_path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
-
     try:
-        log_df = pd.read_csv(log_path)
-        log_df["timestamp"] = pd.to_datetime(log_df["timestamp"])
-        today_count = int((log_df["timestamp"].dt.date == date.today()).sum())
-        if today_count >= RATE_WARN_THRESHOLD:
-            log.warning(
-                "Daily request count (%d) approaching limit of %d",
-                today_count, DAILY_REQUEST_LIMIT,
+        today_count = get_today_count() + 1
+        if today_count >= RATE_LIMIT_WARNING_THRESHOLD:
+            print(
+                f"[usage] WARNING: {today_count} requests today. "
+                f"Approaching Gemini free tier limit of {DAILY_REQUEST_LIMIT}/day."
             )
-    except Exception:
-        pass
+        with open(LOG_PATH, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datetime.utcnow().isoformat(),
+                len(question),
+                model,
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+                rows_retrieved,
+                str(filters),
+            ])
+    except Exception as e:
+        print(f"[usage] Logging failed (non-fatal): {e}")
 
 
-# ── Meta endpoints ─────────────────────────────────────────────────────────────
+# ── Endpoints ──────────────────────────────────────────────────────────────────
 
-@app.get("/health", tags=["Meta"])
+@app.get("/health")
 async def health():
-    """Dependency health check. Returns status 'ok' when CSV and ChromaDB are loaded."""
-    requests_today = 0
-    if Path(LOGS_PATH).exists():
-        try:
-            log_df = pd.read_csv(LOGS_PATH)
-            if "timestamp" in log_df.columns:
-                log_df["timestamp"] = pd.to_datetime(log_df["timestamp"])
-                requests_today = int((log_df["timestamp"].dt.date == date.today()).sum())
-        except Exception:
-            pass
-
-    config_warnings = validate_config()
     return {
-        "status":          "ok" if not config_warnings else "degraded",
-        "config_warnings": config_warnings,
-        "csv_rows":        len(df),
-        "csv_columns":     list(df.columns),
-        "chroma_vectors":  collection.count() if collection else 0,
-        "embed_model":     EMBED_MODEL,
-        "llm_primary":     LLM_MODEL,
-        "llm_fallback":    LLM_FALLBACK,
-        "llm_provider":    "OpenRouter (free tier)",
-        "requests_today":  requests_today,
-        "daily_limit":     DAILY_REQUEST_LIMIT,
+        "status": "ok",
+        "csv_rows": len(df) if df is not None else 0,
+        "csv_columns": len(df.columns) if df is not None else 0,
+        "embed_model": EMBED_MODEL,
+        "llm_model": GEMINI_MODEL,
+        "llm_provider": "Google Gemini (free tier)",
+        "requests_today": get_today_count(),
+        "daily_limit": DAILY_REQUEST_LIMIT,
     }
 
 
-@app.get("/usage/summary", tags=["Meta"])
-async def usage_summary():
-    """Request count and token usage from logs/usage.csv."""
-    if not Path(LOGS_PATH).exists():
-        return {
-            "total_requests":      0,
-            "requests_today":      0,
-            "requests_remaining":  DAILY_REQUEST_LIMIT,
-            "daily_limit":         DAILY_REQUEST_LIMIT,
-            "total_input_tokens":  0,
-            "total_output_tokens": 0,
-            "avg_input_tokens":    None,
-            "avg_output_tokens":   None,
-            "warning_threshold":   RATE_WARN_THRESHOLD,
-        }
-    try:
-        log_df = pd.read_csv(LOGS_PATH)
-        log_df["timestamp"] = pd.to_datetime(log_df["timestamp"])
-        today_df = log_df[log_df["timestamp"].dt.date == date.today()]
-        requests_today = len(today_df)
-
-        has_in  = "input_tokens"  in log_df.columns
-        has_out = "output_tokens" in log_df.columns
-
-        return {
-            "total_requests":      len(log_df),
-            "requests_today":      requests_today,
-            "requests_remaining":  max(0, DAILY_REQUEST_LIMIT - requests_today),
-            "daily_limit":         DAILY_REQUEST_LIMIT,
-            "total_input_tokens":  int(log_df["input_tokens"].sum())  if has_in  else 0,
-            "total_output_tokens": int(log_df["output_tokens"].sum()) if has_out else 0,
-            "avg_input_tokens":    round(log_df["input_tokens"].mean(), 1)  if has_in  else None,
-            "avg_output_tokens":   round(log_df["output_tokens"].mean(), 1) if has_out else None,
-            "warning_threshold":   RATE_WARN_THRESHOLD,
-        }
-    except Exception as exc:
-        return {"error": f"Could not read usage log: {exc}"}
+@app.get("/boroughs")
+async def list_boroughs():
+    if df is None or "borough" not in df.columns:
+        raise HTTPException(status_code=503, detail="Dataset not loaded")
+    boroughs = sorted(df["borough"].dropna().unique().tolist())
+    return {"boroughs": boroughs, "count": len(boroughs)}
 
 
-# ── Chat endpoint ──────────────────────────────────────────────────────────────
-
-@app.post("/chat", tags=["Chat"], response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    """
-    Grounded LLM chat. Retrieves relevant dataset rows, injects them into
-    the system prompt, and returns a cited answer. The model only sees the
-    rows this function retrieves -- it cannot access the full dataset.
-    """
-    chunks, filters, row_count = retrieve(req.message)
-    system_prompt = build_system_prompt(chunks)
-    messages = build_messages(system_prompt, req.history, req.message)
-
-    answer, model_used, usage = call_llm(messages)
-
-    log_request(
-        question_length=len(req.message),
-        model_used=model_used,
-        input_tokens=usage.get("prompt_tokens", 0) or 0,
-        output_tokens=usage.get("completion_tokens", 0) or 0,
-        rows_retrieved=row_count,
-        filters_applied=filters,
+@app.get("/stats/borough")
+async def borough_stats():
+    if df is None:
+        raise HTTPException(status_code=503, detail="Dataset not loaded")
+    target_cols = [
+        "pm25", "no2", "ozone", "aqi",
+        "asthma_er_rate", "asthma_ed_rate",
+        "cardiovascular_hosp_rate", "cardiovascular_ed_rate",
+        "respiratory_hosp_rate", "pm25_deaths",
+    ]
+    available = [c for c in target_cols if c in df.columns]
+    summary = (
+        df.groupby("borough")[available]
+        .mean()
+        .round(2)
+        .reset_index()
+        .to_dict(orient="records")
     )
+    return {"boroughs": summary, "metrics": available}
+
+
+@app.get("/stats/correlations")
+async def correlations():
+    if df is None:
+        raise HTTPException(status_code=503, detail="Dataset not loaded")
+    corr_cols = [
+        "pm25", "no2", "truck_vmt",
+        "asthma_er_rate", "asthma_ed_rate",
+        "cardiovascular_hosp_rate", "cardiovascular_ed_rate",
+        "respiratory_hosp_rate", "pm25_deaths",
+    ]
+    available = [c for c in corr_cols if c in df.columns]
+    result = {}
+    citywide = df[available].dropna()
+    result["citywide"] = citywide.corr().round(3).to_dict()
+    if "borough" in df.columns:
+        for borough in df["borough"].dropna().unique():
+            subset = df[df["borough"] == borough][available].dropna()
+            if len(subset) > 5:
+                result[borough] = subset.corr().round(3).to_dict()
+    return result
+
+
+@app.get("/usage/summary")
+async def usage_summary():
+    today = date.today().isoformat()
+    today_count = 0
+    total_count = 0
+    total_input = 0
+    total_output = 0
+    try:
+        with open(LOG_PATH, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                total_count += 1
+                total_input  += int(row.get("input_tokens", 0) or 0)
+                total_output += int(row.get("output_tokens", 0) or 0)
+                if row.get("timestamp", "").startswith(today):
+                    today_count += 1
+    except FileNotFoundError:
+        pass
+    return {
+        "requests_today":     today_count,
+        "requests_remaining": max(0, DAILY_REQUEST_LIMIT - today_count),
+        "daily_limit":        DAILY_REQUEST_LIMIT,
+        "minute_limit":       15,
+        "total_requests":     total_count,
+        "total_input_tokens": total_input,
+        "total_output_tokens":total_output,
+        "avg_input_tokens":   round(total_input  / total_count, 1) if total_count else 0,
+        "avg_output_tokens":  round(total_output / total_count, 1) if total_count else 0,
+    }
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    # Retrieve relevant rows
+    chunks, filters, row_count = retrieve(req.message)
+
+    # Build grounded system prompt
+    system_prompt = build_system_prompt(chunks)
+
+    # Call Gemini — note: system prompt passed separately, not in messages
+    answer, model_used, usage = call_llm(
+        system_prompt=system_prompt,
+        history=req.history,
+        user_message=req.message,
+    )
+
+    # Log usage
+    log_request(req.message, model_used, usage, row_count, filters)
 
     return ChatResponse(
         answer=answer,
@@ -330,115 +384,3 @@ async def chat(req: ChatRequest):
         filters_applied=filters,
         rows_retrieved=row_count,
     )
-
-
-# ── Data endpoints ─────────────────────────────────────────────────────────────
-
-@app.get("/boroughs", tags=["Data"])
-async def list_boroughs():
-    """Unique boroughs present in the dataset."""
-    if df.empty or "borough" not in df.columns:
-        return {"boroughs": []}
-    return {"boroughs": sorted(df["borough"].dropna().unique().tolist())}
-
-
-@app.get("/stats/borough", tags=["Data"])
-async def borough_stats():
-    """Per-borough mean for every pollution and health metric."""
-    if df.empty:
-        return {"error": "Dataset not loaded. Run src/datamerge.py first."}
-
-    metric_cols = [
-        c for c in [
-            "pm25", "no2", "ozone", "aqi",
-            "asthma_er_rate", "asthma_ed_rate",
-            "cardiovascular_hosp_rate", "cardiovascular_ed_rate",
-            "respiratory_hosp_rate", "pm25_deaths",
-        ]
-        if c in df.columns
-    ]
-
-    if "borough" not in df.columns or not metric_cols:
-        return {"error": "Expected columns not found in dataset."}
-
-    borough_means = (
-        df.groupby("borough")[metric_cols]
-        .mean()
-        .round(2)
-        .to_dict()
-    )
-    # JSON cannot encode float NaN -- replace with None (-> null)
-    summary = {
-        col: {b: (v if pd.notna(v) else None) for b, v in vals.items()}
-        for col, vals in borough_means.items()
-    }
-    return {"borough_averages": summary}
-
-
-@app.get("/stats/hotspots", tags=["Data"])
-async def hotspot_stats():
-    """Top 10 neighborhoods by asthma ER visit rate."""
-    if df.empty:
-        return {"error": "Dataset not loaded."}
-    if "asthma_er_rate" not in df.columns or "geo_place_name" not in df.columns:
-        return {"error": "Required columns not found."}
-
-    top10_df = (
-        df[["geo_place_name", "borough", "asthma_er_rate", "pm25"]]
-        .dropna(subset=["asthma_er_rate"])
-        .sort_values("asthma_er_rate", ascending=False)
-        .drop_duplicates(subset=["geo_place_name"])
-        .head(10)
-    )
-    top10 = [
-        {k: (None if pd.isna(v) else v) for k, v in row.items()}
-        for row in top10_df.to_dict(orient="records")
-    ]
-    return {"top_10_by_asthma_er_rate": top10}
-
-
-@app.get("/stats/correlations", tags=["Data"])
-async def correlations():
-    """
-    Pearson r-values between pollution and health metrics.
-
-    Method: cross-sectional averages per neighborhood.
-    PM2.5 data (annual) and health outcomes (3-year ranges) live on
-    different rows in the dataset, so we average each metric per
-    geo_place_name then join for pairwise complete observations.
-    """
-    if df.empty:
-        return {"error": "Dataset not loaded."}
-
-    pollutant_cols = [c for c in ("pm25", "no2", "ozone", "truck_vmt") if c in df.columns]
-    outcome_cols   = [c for c in (
-        "asthma_er_rate", "cardiovascular_hosp_rate",
-        "respiratory_hosp_rate", "pm25_deaths",
-    ) if c in df.columns]
-
-    if not pollutant_cols or not outcome_cols:
-        return {"error": "Not enough metric columns for correlation."}
-
-    poll_avg = df.groupby("geo_place_name")[pollutant_cols].mean()
-    out_avg  = df.groupby("geo_place_name")[outcome_cols].mean()
-    combined = poll_avg.join(out_avg, how="inner")
-
-    result: dict = {
-        "method": "cross-sectional mean per neighborhood, Pearson r",
-        "citywide": combined.corr().round(3).to_dict(),
-    }
-
-    borough_lookup = (
-        df[["geo_place_name", "borough"]]
-        .dropna()
-        .drop_duplicates()
-        .set_index("geo_place_name")["borough"]
-    )
-    combined["borough"] = combined.index.map(borough_lookup)
-
-    for borough in df["borough"].dropna().unique():
-        subset = combined[combined["borough"] == borough].drop(columns=["borough"])
-        if len(subset) >= 3:
-            result[borough] = subset.corr().round(3).to_dict()
-
-    return {"correlations": result}

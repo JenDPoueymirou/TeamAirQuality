@@ -7,16 +7,10 @@ The system prompt does two things:
   1. Tells the model who it is and what rules it must follow
   2. Injects the retrieved data rows directly into the context
 
-The grounding rules are the most important part. Without them, Llama 3.1
-will happily answer from its training knowledge about NYC air quality —
+The grounding rules are the most important part. Without them the model
+will answer from its training knowledge about NYC air quality —
 which is real knowledge but NOT from your dataset and cannot be cited
 or verified against your specific data.
-
-Note on OpenRouter / OpenAI SDK:
-  Unlike the Anthropic SDK which has a separate system= parameter,
-  OpenRouter uses the OpenAI convention where the system prompt is
-  the FIRST entry in the messages list with role="system".
-  build_messages() handles this correctly.
 """
 
 SYSTEM_TEMPLATE = """You are a data analyst for the NYC Air Pollution and Disease dataset.
@@ -65,49 +59,3 @@ def build_system_prompt(chunks: list[str]) -> str:
         rows_text = "\n".join(chunks)
 
     return SYSTEM_TEMPLATE.format(rows=rows_text)
-
-
-def build_messages(
-    system_prompt: str,
-    history: list[dict],
-    user_message: str,
-) -> list[dict]:
-    """
-    Assemble the full messages list for the OpenRouter / OpenAI API call.
-
-    Structure:
-      [system message]         ← grounded system prompt with injected rows
-      [history message 0]      ← previous turns (if any)
-      [history message 1]
-      ...
-      [current user message]   ← what the user just asked
-
-    The system prompt is injected fresh on EVERY request with the rows
-    retrieved for that specific question. This means the model always
-    sees the most relevant data for what was just asked, not leftover
-    context from a previous turn.
-
-    History carries the conversation flow but the grounding always
-    reflects the current question.
-    """
-    messages = [
-        {"role": "system", "content": system_prompt}
-    ]
-
-    # Append previous conversation turns
-    # Validate each entry has role and content before including
-    for turn in history:
-        if isinstance(turn, dict) and "role" in turn and "content" in turn:
-            if turn["role"] in ("user", "assistant"):
-                messages.append({
-                    "role": turn["role"],
-                    "content": str(turn["content"])
-                })
-
-    # Append the current user message
-    messages.append({
-        "role": "user",
-        "content": user_message
-    })
-
-    return messages

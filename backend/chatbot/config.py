@@ -1,9 +1,8 @@
 """
-chatbot/config.py
------------------
-Single source of truth for all environment variables and
-app-wide constants. Every other module imports from here.
-Nothing else should call os.getenv() directly.
+config.py
+---------
+Single source of truth for all environment variables and constants.
+Restructured to use Google Gemini instead of OpenRouter.
 """
 
 import os
@@ -11,81 +10,114 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Gemini (free LLM) ──────────────────────────────────────────────────────────
+# Get your free key at aistudio.google.com — no credit card needed
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ── OpenRouter (free LLM) ──────────────────────────────────────────────────────
+# Gemini 2.0 Flash — free tier, 1M token context, 1500 req/day
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
-OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
 
-LLM_MODEL: str    = os.getenv("LLM_MODEL",    "meta-llama/llama-3.1-8b-instruct:free")
-LLM_FALLBACK: str = os.getenv("LLM_FALLBACK", "mistralai/mistral-7b-instruct:free")
-LLM_MAX_TOKENS: int = 512
+# ── Local embedding model ──────────────────────────────────────────────────────
+EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
 
-
-# ── Data paths ─────────────────────────────────────────────────────────────────
-
-CSV_PATH:   str = os.getenv("CSV_PATH",   "data/merged_final.csv")
-CHROMA_DIR: str = os.getenv("CHROMA_DIR", "data/.chroma")
-LOGS_PATH:  str = os.getenv("LOGS_PATH",  "logs/usage.csv")
-
-
-# ── Embedding model (local, free) ──────────────────────────────────────────────
-
-EMBED_MODEL: str  = "all-MiniLM-L6-v2"
-COLLECTION_NAME: str = "nyc_pollution"
-
+# ── File paths ─────────────────────────────────────────────────────────────────
+CSV_PATH        = os.getenv("CSV_PATH",   "data/merged_final.csv")
+CHROMA_DIR      = os.getenv("CHROMA_DIR", "data/.chroma")
+COLLECTION_NAME = "nyc_pollution"
 
 # ── Retrieval settings ─────────────────────────────────────────────────────────
+TOP_K    = int(os.getenv("TOP_K", "8"))
+STRUCT_K = 3   # rows from pandas structured filter
+VECTOR_K = 6   # rows from ChromaDB semantic search
 
-TOP_K: int = 8          # max rows to inject into every LLM prompt
-STRUCT_K: int = 3       # rows from pandas filter
-VECTOR_K: int = 6       # rows from Chroma semantic search
+# ── Gemini free tier limits ────────────────────────────────────────────────────
+DAILY_REQUEST_LIMIT          = 1500   # Gemini 2.0 Flash free tier
+RATE_LIMIT_WARNING_THRESHOLD = 1400   # warn when close to cap
+MINUTE_REQUEST_LIMIT         = 15     # requests per minute on free tier
 
-
-# ── Rate limit tracking ────────────────────────────────────────────────────────
-
-DAILY_REQUEST_LIMIT: int = 200    # OpenRouter free tier cap
-RATE_WARN_THRESHOLD: int = 180    # warn the team at 180 req/day
-
-
-# ── Known NYC boroughs and UHF42 neighborhoods ─────────────────────────────────
-
-BOROUGHS: list[str] = [
+# ── Known NYC boroughs ─────────────────────────────────────────────────────────
+BOROUGHS = [
     "Bronx",
-    "Brooklyn",
+    "Brooklyn", 
     "Manhattan",
     "Queens",
     "Staten Island",
 ]
 
-# UHF42 neighborhoods — used by intent extractor to detect neighborhood-level queries
-UHF_NEIGHBORHOODS: list[str] = [
-    "hunts point", "mott haven", "south bronx", "high bridge", "morrisania",
-    "fordham", "pelham", "williamsbridge", "riverdale", "northeast bronx",
-    "greenpoint", "williamsburg", "bedford stuyvesant", "crown heights",
-    "east new york", "brownsville", "flatbush", "borough park", "bensonhurst",
-    "bay ridge", "sunset park", "coney island", "east flatbush", "canarsie",
-    "washington heights", "harlem", "east harlem", "upper west side",
-    "upper east side", "chelsea", "gramercy", "greenwich village", "lower east side",
-    "financial district", "jamaica", "flushing", "ridgewood", "bayside",
-    "rockaway", "stapleton", "south beach", "willowbrook", "port richmond",
-    "gowanus", "carroll gardens",
+# ── UHF42 neighborhood list ────────────────────────────────────────────────────
+UHF_NEIGHBORHOODS = [
+    "hunts point", "mott haven", "south bronx", "crotona", "tremont",
+    "highbridge", "fordham", "pelham", "williamsbridge", "riverdale",
+    "greenpoint", "williamsburg", "bushwick", "east new york", "brownsville",
+    "flatbush", "canarsie", "flatlands", "bensonhurst", "bay ridge",
+    "borough park", "sunset park", "crown heights", "bedford stuyvesant",
+    "bed stuy", "east harlem", "central harlem", "washington heights",
+    "inwood", "upper west side", "upper east side", "chelsea", "clinton",
+    "gramercy park", "lower east side", "chinatown", "downtown",
+    "gowanus", "park slope", "jamaica", "flushing", "bayside",
+    "fresh meadows", "ridgewood", "forest hills", "astoria",
+    "long island city", "stapleton", "port richmond", "willowbrook",
 ]
 
-
-
-
-def validate_config() -> list[str]:
-    """
-    Call this at startup. Returns a list of warning strings for any
-    missing or suspicious config values. Does not raise — lets the
-    app boot with degraded functionality and surface warnings via /health.
-    """
-    warnings = []
-    if not OPENROUTER_API_KEY:
-        warnings.append("OPENROUTER_API_KEY is not set — /chat will fail")
-    if not os.path.exists(CSV_PATH):
-        warnings.append(f"CSV not found at {CSV_PATH} — run src/datamerge.py first")
-    if not os.path.exists(CHROMA_DIR):
-        warnings.append(f"Chroma store not found at {CHROMA_DIR} — run src/ingest.py first")
-    return warnings
+# ── Neighborhood → borough lookup ─────────────────────────────────────────────
+# Lets extract_filters() infer borough when only a neighborhood name appears in
+# the query (e.g. "Hunts Point" → Bronx). Covers every entry in UHF_NEIGHBORHOODS.
+UHF_TO_BOROUGH: dict[str, str] = {
+    # Bronx
+    "hunts point":       "Bronx",
+    "mott haven":        "Bronx",
+    "south bronx":       "Bronx",
+    "crotona":           "Bronx",
+    "tremont":           "Bronx",
+    "highbridge":        "Bronx",
+    "fordham":           "Bronx",
+    "pelham":            "Bronx",
+    "williamsbridge":    "Bronx",
+    "riverdale":         "Bronx",
+    # Brooklyn
+    "greenpoint":        "Brooklyn",
+    "williamsburg":      "Brooklyn",
+    "bushwick":          "Brooklyn",
+    "east new york":     "Brooklyn",
+    "brownsville":       "Brooklyn",
+    "flatbush":          "Brooklyn",
+    "canarsie":          "Brooklyn",
+    "flatlands":         "Brooklyn",
+    "bensonhurst":       "Brooklyn",
+    "bay ridge":         "Brooklyn",
+    "borough park":      "Brooklyn",
+    "sunset park":       "Brooklyn",
+    "crown heights":     "Brooklyn",
+    "bedford stuyvesant":"Brooklyn",
+    "bed stuy":          "Brooklyn",
+    "gowanus":           "Brooklyn",
+    "park slope":        "Brooklyn",
+    # Manhattan
+    "east harlem":       "Manhattan",
+    "central harlem":    "Manhattan",
+    "washington heights":"Manhattan",
+    "inwood":            "Manhattan",
+    "upper west side":   "Manhattan",
+    "upper east side":   "Manhattan",
+    "chelsea":           "Manhattan",
+    "clinton":           "Manhattan",
+    "gramercy park":     "Manhattan",
+    "lower east side":   "Manhattan",
+    "chinatown":         "Manhattan",
+    "downtown":          "Manhattan",
+    # Queens
+    "jamaica":           "Queens",
+    "flushing":          "Queens",
+    "bayside":           "Queens",
+    "fresh meadows":     "Queens",
+    "ridgewood":         "Queens",
+    "forest hills":      "Queens",
+    "astoria":           "Queens",
+    "long island city":  "Queens",
+    # Staten Island
+    "stapleton":         "Staten Island",
+    "port richmond":     "Staten Island",
+    "willowbrook":       "Staten Island",
+}

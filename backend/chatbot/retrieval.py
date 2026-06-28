@@ -20,6 +20,7 @@ from chatbot.config import (
     STRUCT_K,
     TOP_K,
     UHF_NEIGHBORHOODS,
+    UHF_TO_BOROUGH,
     VECTOR_K,
 )
 
@@ -69,6 +70,15 @@ def extract_filters(query: str) -> dict:
         if neighborhood in q:
             filters["neighborhood"] = neighborhood
             break
+
+    # Infer borough from neighborhood when borough isn't explicit in the query.
+    # "What is the asthma rate in Hunts Point?" → borough: Bronx (no word "Bronx" present).
+    # Inferred borough flows into the Chroma where= clause in vector_search(),
+    # keeping semantic results geographically scoped to the right borough.
+    if "neighborhood" in filters and "borough" not in filters:
+        inferred = UHF_TO_BOROUGH.get(filters["neighborhood"])
+        if inferred:
+            filters["borough"] = inferred
 
     year_match = re.search(r"\b(20(?:0[5-9]|1\d|2[0-4]))\b", q)
     if year_match:

@@ -25,6 +25,9 @@ FINAL_COLS = [
     "pm25", "no2", "ozone", "aqi", "purpleair_pm25", "truck_vmt",
     "asthma_er_rate", "cardiovascular_hosp_rate",
     "respiratory_hosp_rate", "pm25_deaths",
+    # Issue #12 — neighborhood ED visit rates from Epiquery / SPARCS
+    "asthma_ed_rate", "cardiovascular_ed_rate",
+    "respiratory_ed_rate", "population",
 ]
 
 # (name column value, measure column value) → output column name.
@@ -203,6 +206,72 @@ def _append_purpleair(merged: pd.DataFrame, pa: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([merged, rows], ignore_index=True, sort=False)
 
 
+# ── ED visit join (Issue #12) ─────────────────────────────────────────────────
+
+def _join_er_visits(merged: pd.DataFrame, er: pd.DataFrame) -> pd.DataFrame:
+    """
+    Left-join neighborhood ED visit rates onto merged on (geo_place_name, year).
+
+    time_period formats handled:
+      "2019"      → year 2019
+      "2017-2019" → year 2019 (end year of the range)
+
+    A left join preserves every pollution row; ED columns are NaN where
+    there is no ED data for that neighborhood/year combination.
+    """
+    er = er.copy()
+    er["geo_place_name"] = er["neighborhood_name"].str.strip()
+    er["year"] = pd.to_numeric(er["year"], errors="coerce").astype("Int64")
+
+    rate_cols = [
+        c for c in ("asthma_ed_rate", "cardiovascular_ed_rate",
+                    "respiratory_ed_rate", "population")
+        if c in er.columns
+    ]
+    # Deduplicate: if the same (neighborhood, year) appears more than once, average
+    er_slim = (
+        er[["geo_place_name", "year"] + rate_cols]
+        .groupby(["geo_place_name", "year"])[rate_cols]
+        .mean()
+        .reset_index()
+    )
+
+    # Extract end year from time_period so ranges map to a single integer
+    merged = merged.copy()
+    merged["_year"] = (
+        merged["time_period"]
+        .str.split("-")
+        .str[-1]
+        .pipe(pd.to_numeric, errors="coerce")
+        .astype("Int64")
+    )
+
+    n_before = len(merged)
+    merged = merged.merge(
+        er_slim,
+        left_on=["geo_place_name", "_year"],
+        right_on=["geo_place_name", "year"],
+        how="left",
+    )
+    # Drop the helper columns introduced by the join
+    merged = merged.drop(columns=["_year", "year"], errors="ignore")
+
+    # ── Join quality report ───────────────────────────────────────────────────
+    n_matched = (
+        merged["asthma_ed_rate"].notna().sum()
+        if "asthma_ed_rate" in merged.columns else 0
+    )
+    pct = n_matched / n_before * 100 if n_before else 0
+    n_unmatched = n_before - n_matched
+    print(f"  Rows matched  : {n_matched:,}")
+    print(f"  Rows unmatched: {n_unmatched:,}")
+    print(f"  Match rate    : {pct:.1f}%")
+    if pct < 70:
+        print("  [warn] Match rate below 70% — ED data may not span all years/neighborhoods")
+
+    return merged
+
+
 # ── summary ───────────────────────────────────────────────────────────────────
 
 def _print_summary(df: pd.DataFrame) -> None:
@@ -221,10 +290,11 @@ def main() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     print("Data merge\n")
 
-    aq_health = _load(DATA_DIR / "air_quality_health.csv", "Air Quality & Health")
-    asthma_ed = _load(DATA_DIR / "asthma_ed_pm25.csv",     "Asthma ED PM2.5")
-    airnow    = _load(DATA_DIR / "airnow_aqi.csv",         "AirNow AQI")
-    purpleair = _load(DATA_DIR / "purpleair_pm25.csv",      "PurpleAir PM2.5")
+    aq_health = _load(DATA_DIR / "air_quality_health.csv",      "Air Quality & Health")
+    asthma_ed = _load(DATA_DIR / "asthma_ed_pm25.csv",          "Asthma ED PM2.5")
+    airnow    = _load(DATA_DIR / "airnow_aqi.csv",              "AirNow AQI")
+    purpleair = _load(DATA_DIR / "purpleair_pm25.csv",          "PurpleAir PM2.5")
+    er_visits = _load(DATA_DIR / "er_visits_neighborhood.csv",  "ED visits (neighborhood)")
 
     if aq_health is None:
         print("\n[error] air_quality_health.csv is required — run src/dataingestion.py first")
@@ -245,7 +315,11 @@ def main() -> None:
         print("Appending PurpleAir sensors...")
         merged = _append_purpleair(merged, purpleair)
 
-    # guarantee every target column exists (Issue #11 fills remaining gaps)
+    if er_visits is not None:
+        print("Joining ED visit rates (neighborhood × year)...")
+        merged = _join_er_visits(merged, er_visits)
+
+    # guarantee every target column exists (NaN where source had no data)
     for col in FINAL_COLS:
         if col not in merged.columns:
             merged[col] = np.nan
