@@ -1,0 +1,139 @@
+{
+  "questions": [
+    {
+      "id": 1,
+      "question": "Which borough has the highest NO2 levels in NYC?",
+      "expected_keywords": ["Manhattan", "(Row"],
+      "expected_borough": "Manhattan",
+      "note": "Manhattan avg NO2 = 25.29 ppb — highest due to tunnel and highway density (Lincoln, Holland, FDR Drive)"
+    },
+    {
+      "id": 2,
+      "question": "What is the PM2.5 level in Manhattan?",
+      "expected_keywords": ["Manhattan", "(Row"],
+      "expected_borough": "Manhattan",
+      "note": "Manhattan avg PM2.5 = 9.50 mcg/m3, highest among the five boroughs"
+    },
+    {
+      "id": 3,
+      "question": "Which borough has the lowest PM2.5 pollution in New York City?",
+      "expected_keywords": ["Staten Island", "(Row"],
+      "expected_borough": "Staten Island",
+      "note": "Staten Island avg PM2.5 = 7.27 mcg/m3, lowest among boroughs"
+    },
+    {
+      "id": 4,
+      "question": "Which NYC borough has the most truck traffic?",
+      "expected_keywords": ["Manhattan", "(Row"],
+      "expected_borough": "Manhattan",
+      "note": "Manhattan avg truck VMT = 6.648 million miles/yr, nearly 2x the Bronx (4.787)"
+    },
+    {
+      "id": 5,
+      "question": "What was the PM2.5 level in NYC in 2009?",
+      "expected_keywords": ["2009", "(Row"],
+      "note": "2009 citywide PM2.5 avg = 11.05 mcg/m3 — the earliest annual year in the dataset"
+    },
+    {
+      "id": 6,
+      "question": "What was the PM2.5 level in NYC in 2022?",
+      "expected_keywords": ["2022", "(Row"],
+      "note": "2022 citywide PM2.5 avg = 6.11 mcg/m3 — nearly half the 2009 level, showing the Clean Air Act's impact"
+    },
+    {
+      "id": 7,
+      "question": "What is the asthma ER rate in Hunts Point?",
+      "expected_keywords": ["Hunts Point", "(Row"],
+      "note": "Hunts Point - Mott Haven neighborhood avg asthma ER rate ~221 per 100,000 — one of the highest in the dataset"
+    },
+    {
+      "id": 8,
+      "question": "What are the asthma ER rates in the Bronx?",
+      "expected_keywords": ["Bronx", "(Row"],
+      "expected_borough": "Bronx",
+      "note": "Bronx borough-level asthma ER rate ranges 108-213 by time period (avg ~156). README claims ~167 which sits within this range."
+    },
+    {
+      "id": 9,
+      "question": "Which borough has the lowest asthma ER rate?",
+      "expected_keywords": ["Staten Island", "(Row"],
+      "expected_borough": "Staten Island",
+      "note": "Staten Island avg asthma ER rate = 50.6 per 100,000, lowest among boroughs"
+    },
+    {
+      "id": 10,
+      "question": "Compare PM2.5 pollution levels between the Bronx and Staten Island",
+      "expected_keywords": ["Bronx", "Staten Island", "(Row"],
+      "note": "Bronx PM2.5 avg 8.31 vs Staten Island 7.27 mcg/m3 — Bronx ~14% higher"
+    },
+    {
+      "id": 11,
+      "question": "What is the NO2 level in Queens?",
+      "expected_keywords": ["Queens", "(Row"],
+      "expected_borough": "Queens",
+      "note": "Queens avg NO2 = 17.93 ppb — second lowest after Staten Island (14.18)"
+    },
+    {
+      "id": 12,
+      "question": "What is the cardiovascular hospitalization rate in Brooklyn?",
+      "expected_keywords": ["Brooklyn", "(Row"],
+      "expected_borough": "Brooklyn",
+      "note": "Brooklyn cardiovascular hosp rate from dataset. Tests health-outcome retrieval for Brooklyn."
+    },
+    {
+      "id": 13,
+      "question": "What are the air quality and health metrics in Harlem?",
+      "expected_keywords": ["Harlem", "(Row"],
+      "note": "Central Harlem - Morningside Heights avg asthma ER rate ~260 per 100,000 — highest neighborhood in dataset"
+    },
+    {
+      "id": 14,
+      "question": "What is the PM2.5 level in Brooklyn over time?",
+      "expected_keywords": ["Brooklyn", "(Row"],
+      "expected_borough": "Brooklyn",
+      "note": "Brooklyn avg PM2.5 = 8.01 mcg/m3. Tests time-series retrieval for Brooklyn."
+    },
+    {
+      "id": 15,
+      "question": "Compare asthma ER rates between Manhattan and Queens",
+      "expected_keywords": ["Manhattan", "Queens", "(Row"],
+      "note": "Manhattan avg 122.2 vs Queens avg 54.6 per 100,000 — Manhattan more than 2x higher"
+    }
+  ],
+  "pending_questions": [
+    {
+      "id": 16,
+      "question": "What is the asthma ED rate in Hunts Point?",
+      "expected_keywords": ["Hunts Point", "(Row"],
+      "depends_on": "Issue #12",
+      "note": "asthma_ed_rate column not yet populated in the dataset"
+    },
+    {
+      "id": 17,
+      "question": "Compare Greenpoint and Gowanus air quality",
+      "expected_keywords": ["Greenpoint", "Gowanus", "(Row"],
+      "depends_on": "Issue #12",
+      "note": "ED rate columns not yet populated; basic PM2.5 comparison will be available once added"
+    },
+    {
+      "id": 18,
+      "question": "Which neighborhood has the highest cardiovascular ED rate?",
+      "expected_keywords": ["(Row"],
+      "depends_on": "Issue #12",
+      "note": "cardiovascular_ed_rate column not yet populated"
+    }
+  ],
+  "meta": {
+    "mvp_target": 10,
+    "total_active": 15,
+    "total_pending": 3,
+    "last_updated": "2026-06-28",
+    "data_notes": [
+      "PM2.5 vs cardiovascular cross-sectional r = -0.221 (README claims 0.88 — README is incorrect for this dataset)",
+      "Respiratory vs cardiovascular row-level r = 0.869 (README claims 0.86 — confirmed correct)",
+      "Hotspot ZIP codes (10474, 11212, etc.) do not appear in merged dataset — AirNow rows have no asthma data",
+      "Bronx borough-level asthma ER rate ranges 108-213 by period; README's ~167 sits within this range",
+      "Tune expected_keywords to match how Llama paraphrases — use partial strings like '11' not '11.05'"
+    ]
+  }
+}
