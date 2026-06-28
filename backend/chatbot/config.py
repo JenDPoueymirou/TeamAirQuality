@@ -10,9 +10,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Gemini (free LLM) ──────────────────────────────────────────────────────────
-# Get your free key at aistudio.google.com — no credit card needed
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# ── API keys ──────────────────────────────────────────────────────────────────
+# All loaded via os.getenv() — never hardcoded, never printed as values.
+# GEMINI_API_KEY  : required for /chat (LLM calls)
+# AIRNOW_API_KEY  : required for src/dataingestion.py (AirNow AQI fetch)
+# PURPLEAIR_API_KEY: required for src/dataingestion.py (PurpleAir fetch)
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY")
+AIRNOW_API_KEY    = os.getenv("AIRNOW_API_KEY")
+PURPLEAIR_API_KEY = os.getenv("PURPLEAIR_API_KEY")
 
 # Gemini 2.0 Flash — free tier, 1M token context, 1500 req/day
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -121,3 +126,17 @@ UHF_TO_BOROUGH: dict[str, str] = {
     "port richmond":     "Staten Island",
     "willowbrook":       "Staten Island",
 }
+
+
+# ── Key presence summary ───────────────────────────────────────────────────────
+
+def safe_config_summary() -> dict[str, bool]:
+    """
+    Return which API keys are configured — True/False presence flags only.
+    Never includes actual key values. Safe to expose in /health and logs.
+    """
+    return {
+        "GEMINI_API_KEY":    bool(GEMINI_API_KEY),
+        "AIRNOW_API_KEY":    bool(AIRNOW_API_KEY),
+        "PURPLEAIR_API_KEY": bool(PURPLEAIR_API_KEY),
+    }

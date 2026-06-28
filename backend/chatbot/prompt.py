@@ -43,7 +43,13 @@ GROUNDING RULES — follow these on every response:
 RETRIEVED DATA ROWS:
 {rows}
 
-Answer the user's question using only the rows above."""
+Answer the user's question using only the rows above.
+
+FINAL REMINDER — citation requirement:
+Every factual claim, number, or rate in your response MUST be followed
+immediately by its source row in parentheses, like: 18.2 µg/m³ (Row 3).
+If no retrieved row supports a claim, do not make that claim.
+Responses without at least one (Row N) citation violate grounding rules."""
 
 
 def build_system_prompt(chunks: list[str]) -> str:
