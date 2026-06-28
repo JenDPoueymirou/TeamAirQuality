@@ -1,189 +1,232 @@
-# TeamAirQuality
-This is a project we all created for the Bloomberg Hackathon.
-# NYC Air Pollution & Disease: A Borough-Level Analysis
+# NYC Air Quality Chatbot
 
-> **Research Question:** Are neighborhoods with higher truck traffic and pollution levels associated with higher rates of asthma ER visits, cardiovascular hospitalizations, and pollution-related deaths across NYC's 5 boroughs?
+A grounded AI chatbot that answers questions about air pollution and public health outcomes across New York City's five boroughs. The model can only cite facts from the dataset — it cannot hallucinate statistics it hasn't seen.
 
----
-
-## Project Overview
-
-This project investigates the relationship between air pollution and disease outcomes across New York City's 5 boroughs from 2005 to 2024. Using data from four live APIs and nearly 20 years of historical records, the analysis examines how long-term exposure to PM2.5, NO2, and ozone — particularly in neighborhoods near highways, bridges, tunnels, and truck corridors — correlates with higher rates of:
-
-- Asthma emergency department visits
-- Cardiovascular hospitalizations
-- Respiratory hospitalizations
-- Cardiac and respiratory deaths
-
-A key focus is the environmental justice dimension: communities in the South Bronx, Brownsville, Greenpoint, and Gowanus face compounding pollution burdens from truck traffic, industrial waterways, and Superfund sites that drive disease rates far above citywide averages.
+Built for the Bloomberg Hackathon.
 
 ---
 
-## Data Sources & APIs
+## Project Description
 
-| # | Source | Dataset | Key Required |
-|---|---|---|---|
-| 1 | NYC Open Data | Air Quality & Health Impacts `c3uy-2p5r` | No |
-| 2 | NYC Open Data | PM2.5 Attributable Asthma ED Visits `ebe7-6eah` | No |
-| 3 | EPA AirNow | Real-time AQI by zip code | Yes (free) |
-| 4 | PurpleAir | Community sensor network — fills Brooklyn & Manhattan gaps | Yes (free) |
+**Research question:** Which NYC communities bear a disproportionate pollution burden, and how does that burden correlate with measurable health outcomes?
 
-**Total dataset: 19,261 rows across all sources**
+The dataset covers 2005–2024 at UHF42 neighborhood granularity — the same geography used by NYC DOHMH for public health surveillance. Each row links air quality measurements (PM2.5, NO2, ozone, AQI) to health outcomes (asthma ER rates, cardiovascular hospitalization rates, respiratory hospitalization rates, PM2.5-attributable deaths) and traffic density (truck VMT).
+
+**Environmental justice angle:** South Bronx neighborhoods like Hunts Point and Mott Haven, Brownsville in Brooklyn, and industrial waterfront areas like Greenpoint and Gowanus carry outsized pollution loads relative to the rest of the city. The chatbot makes this neighborhood-level disparity queryable in plain English.
 
 ---
 
-## Variables
+## Free Stack — Zero Cost
 
-### Dependent Variable
-| Variable | Type |
-|---|---|
-| Asthma ER visit rate (per 100,000) | Quantitative |
+| Tool                          | Role                | Cost  |
+| ----------------------------- | ------------------- | ----- |
+| Google Gemini 2.0 Flash       | LLM inference       | $0.00 |
+| sentence-transformers         | Local embeddings    | $0.00 |
+| ChromaDB                      | Local vector store  | $0.00 |
+| NYC Open Data (Socrata)       | Pollution dataset   | $0.00 |
+| NYC DOHMH Epiquery            | ER visit dataset    | $0.00 |
+| EPA AirNow                    | Real-time AQI       | $0.00 |
+| PurpleAir                     | Community sensors   | $0.00 |
+| FastAPI + uvicorn             | Backend API         | $0.00 |
 
-### Independent Variables (9 total)
-| Variable | Type |
-|---|---|
-| PM2.5 concentration (mcg/m³) | Quantitative |
-| Nitrogen dioxide NO2 (ppb) | Quantitative |
-| Ozone O3 (ppb) | Quantitative |
-| Annual truck vehicle miles traveled | Quantitative |
-| Annual total vehicle miles traveled | Quantitative |
-| Real-time AQI (EPA AirNow) | Quantitative |
-| Real-time PM2.5 (PurpleAir) | Quantitative |
-| Borough | Categorical |
-| Time Period | Categorical |
+---
+
+## Free Tier Limits
+
+Gemini 2.0 Flash free tier: **1,500 requests/day · 15 requests/minute · 1 million token context window**
+
+- Monitor usage: `GET /usage/summary`
+- Warning log fires at: 1,400 requests/day
+- No credit card required
+
+---
+
+## Prerequisites
+
+- Python 3.11+
+- **Gemini API key** (free):
+  1. Go to [aistudio.google.com](https://aistudio.google.com)
+  2. Sign in with any Google account
+  3. Click **Get API Key** → **Create API key**
+  4. Copy the key — you'll paste it into `.env` in step 3 below
+- **AirNow API key** (free): [docs.airnowapi.org/account/request](https://docs.airnowapi.org/account/request)
+- **PurpleAir API key** (free): [develop.purpleair.com](https://develop.purpleair.com)
+
+---
+
+## Setup — Run These Steps in Order
+
+All commands run from the `backend/` directory.
+
+```bash
+# 1. Clone and enter the repo
+git clone <repo-url>
+cd TeamAirQuality/backend
+
+# 2. Create and activate a virtual environment
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Configure environment variables
+cp .env.example .env
+# Open .env and fill in your three API keys:
+#   GEMINI_API_KEY=AIza...   ← from aistudio.google.com
+#   AIRNOW_API_KEY=...
+#   PURPLEAIR_API_KEY=...
+
+# 5. Fetch raw data from all four sources (~2 minutes)
+python src/dataingestion.py
+
+# 6. Merge into a single wide-format CSV (< 10 seconds)
+python src/datamerge.py
+
+# 7. Embed all rows into ChromaDB (~3 minutes on first run, then cached)
+python src/ingest.py
+
+# 8. Start the API server
+uvicorn chatbot.main:app --reload
+```
+
+The server starts at `http://localhost:8000`. Interactive API docs: `http://localhost:8000/docs`
+
+---
+
+## Verify Each Step Works
+
+Run these in order to confirm the pipeline built correctly before sending your first chat.
+
+```bash
+# Confirm step 6 produced the merged CSV
+python -c "import pandas as pd; df = pd.read_csv('data/merged_final.csv'); print(len(df), 'rows')"
+# Expected: 2171 rows
+
+# Confirm step 7 embedded all rows into ChromaDB
+python -c "import chromadb; c = chromadb.PersistentClient('data/.chroma'); print(c.get_collection('nyc_pollution').count(), 'vectors')"
+# Expected: 2171 vectors
+
+# Confirm the server loaded all dependencies
+curl http://localhost:8000/health
+# Expected: {"status":"ok","csv_rows":2171,...,"llm_provider":"Google Gemini (free tier)"}
+
+# Confirm data endpoints
+curl http://localhost:8000/boroughs
+curl http://localhost:8000/stats/borough
+curl http://localhost:8000/stats/correlations
+
+# Confirm the chatbot answers with grounded citations
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Which borough has the highest asthma rate?"}'
+# Expected: answer mentions Bronx and contains at least one (Row N) citation
+```
+
+---
+
+## Running Evaluations
+
+The eval suite checks 15 questions with known correct answers derived from the dataset.
+
+```bash
+# Server must be running first (default port 8001 for evals)
+python evals/run_evals.py
+
+# Show full LLM answers for every question
+python evals/run_evals.py --verbose
+
+# Target a different server port
+python evals/run_evals.py --url http://127.0.0.1:8000
+```
+
+MVP is considered working at **10/15 questions passed**.
+
+---
+
+## Common Issues
+
+| Symptom | Cause | Fix |
+| ------- | ----- | --- |
+| `RuntimeError: GEMINI_API_KEY not found` | `.env` doesn't exist or key is blank | Run `cp .env.example .env`, fill in the key, restart the server |
+| `RuntimeError: CSV not found` | Data pipeline hasn't run | Run steps 5 and 6 (`dataingestion.py` then `datamerge.py`) |
+| `RuntimeError: ChromaDB not found` | Ingest hasn't run | Run step 7 (`src/ingest.py`) |
+| HTTP 429 from `/chat` | Hit 15 req/min free-tier limit | Wait 60 seconds and retry |
+| `ModuleNotFoundError` on startup | Virtual environment not activated | Run `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (Mac/Linux) |
 
 ---
 
 ## Project Structure
 
 ```
-Pollution&DiseaseNYC/
-├── src/
-│   ├── dataingestion.py        # Pulls data from all 4 APIs → saves CSVs
-│   └── datamerge.py            # Merges CSVs into merged_final.csv
-├── Notebooks/
-│   ├── final_project_main.ipynb     # Main analysis notebook
-│   └── nyc_pollution_map.html  # Interactive zip code heatmap
-├── Data/                       # CSVs saved here (not tracked by Git)
-│   ├── Air_Quality_and_Health_Impacts.csv
-│   ├── nyc_air_quality_health.csv
-│   ├── asthma_ed_pm25.csv
-│   ├── airnow_realtime_aqi.csv
-│   ├── purpleair_pm25.csv
-│   └── merged_final.csv
-├── .env                        # API keys (not tracked by Git — see .env.example)
-├── .env.example                # Template showing required keys
-├── .gitignore
-└── ReadMe.md
+TeamAirQuality/
+└── backend/
+    ├── src/
+    │   ├── dataingestion.py   # Fetch raw data from 4 sources → data/*.csv
+    │   ├── datamerge.py       # Join CSVs → data/merged_final.csv (2,171 rows)
+    │   └── ingest.py          # Embed rows → data/.chroma/ (2,171 vectors)
+    ├── chatbot/
+    │   ├── config.py          # All env vars and constants
+    │   ├── main.py            # FastAPI app, endpoints, call_llm, log_request
+    │   ├── retrieval.py       # Hybrid retrieval (structured filter + semantic)
+    │   └── prompt.py          # System prompt template and grounding rules
+    ├── evals/
+    │   ├── golden_set.json    # 15 questions with expected answers
+    │   └── run_evals.py       # Eval runner — prints score out of 15
+    ├── docs/
+    │   └── architecture.md    # System diagram and layer descriptions
+    ├── data/                  # Generated — not committed to git
+    │   ├── merged_final.csv
+    │   └── .chroma/
+    ├── logs/                  # Generated — usage.csv written by /chat
+    ├── .env.example           # Copy to .env and fill in keys
+    └── requirements.txt
 ```
 
 ---
 
-## Setup Instructions
+## API Reference
 
-### 1. Clone the repository
-```bash
-git clone https://github.com/JenDPoueymirou/Pollution-DiseaseNYC.git
-cd Pollution-DiseaseNYC
-```
+| Method | Path                  | Description                                                  |
+| ------ | --------------------- | ------------------------------------------------------------ |
+| GET    | `/health`             | Dependency check — csv_rows, chroma_vectors, llm_provider   |
+| GET    | `/boroughs`           | List of boroughs in the dataset                              |
+| GET    | `/stats/borough`      | Per-borough mean for all pollution and health metrics        |
+| GET    | `/stats/correlations` | Pearson r between pollutants and health outcomes             |
+| GET    | `/stats/hotspots`     | Top 10 neighborhoods by asthma ER rate                       |
+| GET    | `/usage/summary`      | Today's request count, token totals, remaining quota         |
+| POST   | `/chat`               | Grounded LLM answer with (Row N) citations                   |
 
-### 2. Create a conda environment
-```bash
-conda create -n school python=3.12
-conda activate school
-```
-
-### 3. Install dependencies
-```bash
-pip install pandas numpy matplotlib seaborn folium branca requests python-dotenv
-```
-
-### 4. Set up API keys
-Copy `.env.example` to `.env` and fill in your keys:
-```bash
-cp .env.example .env
-```
-Then edit `.env`:
-```
-AIRNOW_API_KEY=your_airnow_key_here
-PURPLEAIR_API_KEY=your_purpleair_read_key_here
-CENSUS_API_KEY=your_census_key_here
-```
-
-**Getting free API keys:**
-- **AirNow:** Register at [airnow.gov/api](https://docs.airnowapi.org/account/request/)
-- **PurpleAir:** Register at [develop.purpleair.com](https://develop.purpleair.com)
-- **Census Bureau:** Register at [api.census.gov/data/key_signup.html](https://api.census.gov/data/key_signup.html)
-
-### 5. Run data ingestion
-```bash
-python src/dataingestion.py
-python src/datamerge.py
-```
-
-### 6. Open the notebook
-Open `Notebooks/final_project_main.ipynb` in Jupyter or VSCode and run all cells.
+Full interactive docs: `http://localhost:8000/docs`
 
 ---
 
-## Key Findings
+## How the Chatbot Works
 
-### Pollution Trends
-- PM2.5 levels have declined across all 5 boroughs since 2008, but the **Bronx and Manhattan consistently exceed the EPA annual standard of 12 mcg/m³**
-- NO2 levels are highest in Manhattan due to the density of tunnel approaches (Lincoln, Holland, Battery tunnels) and the FDR Drive
-- Ozone levels are paradoxically lower directly on highways and higher in surrounding neighborhoods — residents living near the Cross Bronx Expressway face both direct exhaust and ozone drift
+Every `/chat` request runs this pipeline before calling the LLM:
 
-### Health Outcomes
-- The **Bronx has the highest asthma ER visit rate** at 167 per 100,000 — nearly 7x higher than the lowest borough
-- **Cardiovascular hospitalizations correlate strongly with PM2.5 deaths** (r = 0.88) — the two health outcomes move together
-- **Respiratory hospitalizations correlate with cardiovascular hospitalizations** (r = 0.86) — pollution affects the heart and lungs simultaneously
-- Notable hotspots: Hunts Point (10474), Brownsville (11212), Greenpoint (11222), Broadway Junction (11233), Gowanus (11215/11217)
+1. **Intent extraction** — scan the question for borough names, UHF neighborhoods, years, and ZIP codes using keyword matching and regex. No LLM needed.
+2. **Structured filter** — filter `merged_final.csv` in memory using the detected values. Fast and precise for known entities.
+3. **Semantic search** — embed the question locally with `all-MiniLM-L6-v2` (~80 MB, runs on CPU), query ChromaDB for the most similar stored row vectors. Catches paraphrasing the keyword filter would miss.
+4. **Merge and deduplicate** — combine both result sets, cap at 8 rows.
+5. **Grounded prompt** — inject the rows directly into the system prompt. The model can only cite facts from these rows.
+6. **LLM call** — send to Gemini 2.0 Flash with the grounded system prompt in `system_instruction`.
+7. **Log** — append token counts and metadata to `logs/usage.csv`.
 
-### Real-Time Data
-- Live AirNow readings show AQI averaging **36–41 across boroughs** at time of analysis
-- PurpleAir community sensors reveal **hyperlocal spikes** near truck corridors not captured by official monitors
-- Brooklyn and Manhattan have the fewest official air monitors despite having significant pollution sources — a finding that itself reflects environmental justice disparities
+The model is instructed to cite every number as `(Row N)` and say `"I don't have that data in my current context."` if the retrieved rows don't cover the question.
+
+See [docs/architecture.md](backend/docs/architecture.md) for the full system diagram.
 
 ---
 
-## Interactive Map
+## Key Dataset Findings
 
-The file `Notebooks/nyc_pollution_map.html` contains a standalone interactive heatmap of all NYC zip codes. Open it in any browser.
-
-**Features:**
-- Blue → red color scale (blue = cleaner, red = more polluted)
-- Hover over any zip code for AQI, PM2.5, asthma ER rate, cardiovascular hospitalization rate, truck traffic index, and infrastructure notes
-- Click any zip code to pin its data
-- Special callouts for Superfund sites, major highway corridors, and truck terminals
-
----
-
-## Environmental Justice Context
-
-This project documents a pattern that disproportionately affects lower-income communities and communities of color:
-
-- **Hunts Point, Bronx (10474)** — the city's largest food distribution hub processes 22 billion pounds of food annually using thousands of diesel trucks, adjacent to the Cross Bronx Expressway and Bruckner Expressway
-- **Gowanus, Brooklyn (11215/11217)** — EPA Superfund site, the canal contains benzene, coal tar, and heavy metals linked to respiratory and neurological disease
-- **Newtown Creek, Brooklyn/Queens (11222/11378)** — one of the most polluted waterways in the US, borders industrial truck corridors
-- **Broadway Junction, Brooklyn (11233)** — active radioactive remediation site adjacent to the BQE
-
----
-
-## Technologies Used
-
-- **Python 3.12** (Miniconda)
-- **pandas** — data manipulation
-- **matplotlib / seaborn** — static visualizations
-- **folium / branca** — interactive maps
-- **requests** — API calls
-- **python-dotenv** — secure API key management
-- **Jupyter Notebook** — analysis environment
-
----
-
-## Authors
-
-**Jennifer Poueymirou** — Data Science Cohort
-**Darnel Castor** 
-The Knowledge House 
-June 2026
+- **Manhattan** has the highest NO2 (25.3 ppb avg) and highest PM2.5 (9.5 µg/m³ avg) among boroughs, driven by tunnel density and highway traffic
+- **Staten Island** has the lowest PM2.5 (7.3 µg/m³) and the lowest asthma ER rate (50.6 per 100,000)
+- **PM2.5 has declined sharply** — from 11.1 µg/m³ citywide in 2009 to 6.1 µg/m³ in 2022
+- **Central Harlem** has the highest neighborhood-level asthma ER rate (~260 per 100,000)
+- **Respiratory and cardiovascular hospitalization rates** correlate at r = 0.87 — areas with one burden tend to have the other
+- **PM2.5 and NO2** correlate at r = 0.96 across neighborhoods — same traffic sources drive both
