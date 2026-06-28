@@ -1,0 +1,25 @@
+# Secrets — never bake into the image; pass via --env-file at runtime
+.env
+.env.*
+*.env
+
+# Runtime-generated data — mount as a volume if you need persistence
+logs/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+coverage.xml
+
+# Dev / docs — not needed in the image
+evals/
+docs/
+
+# OS metadata
+.DS_Store
+Thumbs.db
