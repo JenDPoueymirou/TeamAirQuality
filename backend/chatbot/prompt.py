@@ -25,8 +25,9 @@ This dataset covers all 5 New York City boroughs from 2005 to 2024, with
 
 The dataset tracks:
 - Air pollutants: PM2.5 (mcg/m3), NO2 (ppb), Ozone (ppb), AQI
-- Health outcomes: Asthma ER visit rates, cardiovascular hospitalization rates,
-  respiratory hospitalization rates, PM2.5 attributable deaths (all per 100,000)
+- Health outcomes: Asthma ER rates, asthma ED rates, cardiovascular hospitalization
+  rates, cardiovascular ED rates, respiratory hospitalization rates,
+  respiratory ED rates, PM2.5 attributable deaths (all per 100,000)
 - Traffic: Annual truck vehicle miles traveled
 - Geography: Borough, UHF neighborhood, ZIP code, time period
 

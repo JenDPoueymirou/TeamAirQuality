@@ -1,16 +1,17 @@
+import csv
 import logging
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import chromadb
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
-from chatbot.chat import router as chat_router
 from chatbot.config import (
     CHROMA_DIR,
     COLLECTION_NAME,
@@ -22,9 +23,11 @@ from chatbot.config import (
     LOGS_PATH,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
+    RATE_WARN_THRESHOLD,
     validate_config,
 )
-from chatbot.retrieval import init_retrieval
+from chatbot.prompt import build_messages, build_system_prompt
+from chatbot.retrieval import init_retrieval, retrieve
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,10 +51,9 @@ async def lifespan(app: FastAPI):
     global df, collection, embed_model, oai_client
 
     log.info("=" * 55)
-    log.info("  NYC Pollution Chatbot — starting up")
+    log.info("  NYC Pollution Chatbot -- starting up")
     log.info("=" * 55)
 
-    # surface missing config early (non-fatal warnings)
     for w in validate_config():
         log.warning("CONFIG: %s", w)
 
@@ -63,7 +65,7 @@ async def lifespan(app: FastAPI):
         )
     df = pd.read_csv(CSV_PATH)
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    log.info("CSV loaded — %d rows from %s", len(df), CSV_PATH)
+    log.info("CSV loaded -- %d rows from %s", len(df), CSV_PATH)
 
     # 2. Connect ChromaDB — hard failure if ingest hasn't been run
     if not Path(CHROMA_DIR).exists():
@@ -73,7 +75,7 @@ async def lifespan(app: FastAPI):
         )
     chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
     collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
-    log.info("ChromaDB loaded — %d vectors", collection.count())
+    log.info("ChromaDB loaded -- %d vectors", collection.count())
 
     # 3. Load embedding model (~80 MB on first run, cached after)
     try:
@@ -81,26 +83,26 @@ async def lifespan(app: FastAPI):
         embed_model = SentenceTransformer(EMBED_MODEL)
         log.info("Embedding model ready")
     except Exception as exc:
-        log.warning("Embedding model failed: %s — semantic search disabled", exc)
+        log.warning("Embedding model failed: %s -- semantic search disabled", exc)
 
     # 4. Wire retrieval module with all three dependencies
     init_retrieval(df, collection, embed_model)
 
-    # 5. Initialize OpenRouter / OpenAI client (used by Issue #7 chat endpoint)
+    # 5. Initialize OpenRouter / OpenAI client (used by /chat)
     if OPENROUTER_API_KEY:
         oai_client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
         log.info("OpenAI client pointed at %s", OPENROUTER_BASE_URL)
     else:
-        log.warning("OPENROUTER_API_KEY not set — /chat will be disabled until key is added")
+        log.warning("OPENROUTER_API_KEY not set -- /chat will be disabled until key is added")
 
-    # 6. Ensure logs directory and usage file exist
+    # 6. Ensure logs directory exists
     Path(LOGS_PATH).parent.mkdir(parents=True, exist_ok=True)
 
     log.info("=" * 55)
-    log.info("  Startup complete — http://localhost:8000/docs")
+    log.info("  Startup complete -- http://localhost:8000/docs")
     log.info("=" * 55)
 
-    yield  # app runs here
+    yield
 
     log.info("Shutting down.")
 
@@ -111,7 +113,7 @@ app = FastAPI(
     title="NYC Pollution Chatbot API",
     description=(
         "Grounded AI chatbot over the NYC Air Pollution & Disease dataset "
-        "(2005–2024, 5 boroughs, 2,171 rows). Free stack: OpenRouter + "
+        "(2005-2024, 5 boroughs, 2,171 rows). Free stack: OpenRouter + "
         "sentence-transformers + ChromaDB."
     ),
     version="0.1.0",
@@ -120,22 +122,119 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten when deploying
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(chat_router)
+
+# ── Request / Response models ──────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=500)
+    history: list[dict] = Field(default_factory=list, max_length=10)
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    model_used: str
+    filters_applied: dict
+    rows_retrieved: int
+
+
+# ── LLM helpers ───────────────────────────────────────────────────────────────
+
+def call_llm(messages: list[dict]) -> tuple[str, str, dict]:
+    """
+    Try primary model first; on 429 or 503 retry once with the fallback model.
+    Raises HTTP 503 if both models fail.
+
+    Note: OpenRouter free models sometimes omit usage counts in their response.
+    Treat missing prompt_tokens / completion_tokens as 0 rather than crashing —
+    known limitation of the free tier.
+    """
+    if oai_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="LLM not configured -- set OPENROUTER_API_KEY in .env",
+        )
+
+    last_exc: Exception | None = None
+
+    for model in (LLM_MODEL, LLM_FALLBACK):
+        try:
+            resp = oai_client.chat.completions.create(
+                model=model,
+                messages=messages,
+            )
+            answer = resp.choices[0].message.content or ""
+            usage = {
+                "prompt_tokens":     (resp.usage.prompt_tokens     or 0) if resp.usage else 0,
+                "completion_tokens": (resp.usage.completion_tokens or 0) if resp.usage else 0,
+            }
+            log.info("LLM responded via %s", model)
+            return answer, model, usage
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status in (429, 503):
+                log.warning("Model %s returned %s -- trying fallback", model, status)
+                last_exc = exc
+                continue
+            log.error("LLM call failed: %s", exc)
+            raise HTTPException(status_code=502, detail=f"LLM error: {exc}") from exc
+
+    raise HTTPException(
+        status_code=503,
+        detail="Both LLM models are unavailable. Try again later.",
+    )
+
+
+def log_request(
+    question_length: int,
+    model_used: str,
+    input_tokens: int,
+    output_tokens: int,
+    rows_retrieved: int,
+    filters_applied: dict,
+) -> None:
+    log_path = Path(LOGS_PATH)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    row = {
+        "timestamp":       datetime.now().isoformat(),
+        "question_length": question_length,
+        "model_used":      model_used,
+        "input_tokens":    input_tokens,
+        "output_tokens":   output_tokens,
+        "rows_retrieved":  rows_retrieved,
+        "filters_applied": str(filters_applied),
+    }
+
+    write_header = not log_path.exists()
+    with log_path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+    try:
+        log_df = pd.read_csv(log_path)
+        log_df["timestamp"] = pd.to_datetime(log_df["timestamp"])
+        today_count = int((log_df["timestamp"].dt.date == date.today()).sum())
+        if today_count >= RATE_WARN_THRESHOLD:
+            log.warning(
+                "Daily request count (%d) approaching limit of %d",
+                today_count, DAILY_REQUEST_LIMIT,
+            )
+    except Exception:
+        pass
 
 
 # ── Meta endpoints ─────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["Meta"])
 async def health():
-    """
-    Dependency health check. Returns status 'ok' when CSV and ChromaDB
-    are both loaded with data. Check this first if something feels wrong.
-    """
+    """Dependency health check. Returns status 'ok' when CSV and ChromaDB are loaded."""
     requests_today = 0
     if Path(LOGS_PATH).exists():
         try:
@@ -148,17 +247,17 @@ async def health():
 
     config_warnings = validate_config()
     return {
-        "status": "ok" if not config_warnings else "degraded",
+        "status":          "ok" if not config_warnings else "degraded",
         "config_warnings": config_warnings,
-        "csv_rows": len(df),
-        "csv_columns": list(df.columns),
-        "chroma_vectors": collection.count() if collection else 0,
-        "embed_model": EMBED_MODEL,
-        "llm_primary": LLM_MODEL,
-        "llm_fallback": LLM_FALLBACK,
-        "llm_provider": "OpenRouter (free tier)",
-        "requests_today": requests_today,
-        "daily_limit": DAILY_REQUEST_LIMIT,
+        "csv_rows":        len(df),
+        "csv_columns":     list(df.columns),
+        "chroma_vectors":  collection.count() if collection else 0,
+        "embed_model":     EMBED_MODEL,
+        "llm_primary":     LLM_MODEL,
+        "llm_fallback":    LLM_FALLBACK,
+        "llm_provider":    "OpenRouter (free tier)",
+        "requests_today":  requests_today,
+        "daily_limit":     DAILY_REQUEST_LIMIT,
     }
 
 
@@ -167,26 +266,70 @@ async def usage_summary():
     """Request count and token usage from logs/usage.csv."""
     if not Path(LOGS_PATH).exists():
         return {
-            "total_requests": 0,
-            "requests_today": 0,
-            "remaining_today": DAILY_REQUEST_LIMIT,
-            "message": "No requests logged yet.",
+            "total_requests":      0,
+            "requests_today":      0,
+            "requests_remaining":  DAILY_REQUEST_LIMIT,
+            "daily_limit":         DAILY_REQUEST_LIMIT,
+            "total_input_tokens":  0,
+            "total_output_tokens": 0,
+            "avg_input_tokens":    None,
+            "avg_output_tokens":   None,
+            "warning_threshold":   RATE_WARN_THRESHOLD,
         }
     try:
         log_df = pd.read_csv(LOGS_PATH)
         log_df["timestamp"] = pd.to_datetime(log_df["timestamp"])
         today_df = log_df[log_df["timestamp"].dt.date == date.today()]
+        requests_today = len(today_df)
+
+        has_in  = "input_tokens"  in log_df.columns
+        has_out = "output_tokens" in log_df.columns
+
         return {
-            "total_requests_all_time": len(log_df),
-            "requests_today": len(today_df),
-            "remaining_today": max(0, DAILY_REQUEST_LIMIT - len(today_df)),
-            "avg_input_tokens": round(log_df["input_tokens"].mean(), 1)
-                if "input_tokens" in log_df.columns else None,
-            "avg_output_tokens": round(log_df["output_tokens"].mean(), 1)
-                if "output_tokens" in log_df.columns else None,
+            "total_requests":      len(log_df),
+            "requests_today":      requests_today,
+            "requests_remaining":  max(0, DAILY_REQUEST_LIMIT - requests_today),
+            "daily_limit":         DAILY_REQUEST_LIMIT,
+            "total_input_tokens":  int(log_df["input_tokens"].sum())  if has_in  else 0,
+            "total_output_tokens": int(log_df["output_tokens"].sum()) if has_out else 0,
+            "avg_input_tokens":    round(log_df["input_tokens"].mean(), 1)  if has_in  else None,
+            "avg_output_tokens":   round(log_df["output_tokens"].mean(), 1) if has_out else None,
+            "warning_threshold":   RATE_WARN_THRESHOLD,
         }
     except Exception as exc:
         return {"error": f"Could not read usage log: {exc}"}
+
+
+# ── Chat endpoint ──────────────────────────────────────────────────────────────
+
+@app.post("/chat", tags=["Chat"], response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    """
+    Grounded LLM chat. Retrieves relevant dataset rows, injects them into
+    the system prompt, and returns a cited answer. The model only sees the
+    rows this function retrieves -- it cannot access the full dataset.
+    """
+    chunks, filters, row_count = retrieve(req.message)
+    system_prompt = build_system_prompt(chunks)
+    messages = build_messages(system_prompt, req.history, req.message)
+
+    answer, model_used, usage = call_llm(messages)
+
+    log_request(
+        question_length=len(req.message),
+        model_used=model_used,
+        input_tokens=usage.get("prompt_tokens", 0) or 0,
+        output_tokens=usage.get("completion_tokens", 0) or 0,
+        rows_retrieved=row_count,
+        filters_applied=filters,
+    )
+
+    return ChatResponse(
+        answer=answer,
+        model_used=model_used,
+        filters_applied=filters,
+        rows_retrieved=row_count,
+    )
 
 
 # ── Data endpoints ─────────────────────────────────────────────────────────────
@@ -201,11 +344,7 @@ async def list_boroughs():
 
 @app.get("/stats/borough", tags=["Data"])
 async def borough_stats():
-    """
-    Per-borough mean for every pollution and health metric.
-    Pure pandas — no LLM. Columns that don't exist yet (asthma_ed_rate,
-    cardiovascular_ed_rate) are silently skipped until Issues #11/#12.
-    """
+    """Per-borough mean for every pollution and health metric."""
     if df.empty:
         return {"error": "Dataset not loaded. Run src/datamerge.py first."}
 
@@ -228,7 +367,7 @@ async def borough_stats():
         .round(2)
         .to_dict()
     )
-    # JSON can't encode float NaN — replace with None (→ null)
+    # JSON cannot encode float NaN -- replace with None (-> null)
     summary = {
         col: {b: (v if pd.notna(v) else None) for b, v in vals.items()}
         for col, vals in borough_means.items()
@@ -238,7 +377,7 @@ async def borough_stats():
 
 @app.get("/stats/hotspots", tags=["Data"])
 async def hotspot_stats():
-    """Top 10 neighborhoods by asthma ER visit rate. Pure pandas."""
+    """Top 10 neighborhoods by asthma ER visit rate."""
     if df.empty:
         return {"error": "Dataset not loaded."}
     if "asthma_er_rate" not in df.columns or "geo_place_name" not in df.columns:
@@ -267,10 +406,6 @@ async def correlations():
     PM2.5 data (annual) and health outcomes (3-year ranges) live on
     different rows in the dataset, so we average each metric per
     geo_place_name then join for pairwise complete observations.
-    This produces one data point per neighborhood — the correlation
-    captures geographic variation, not time-series variation.
-
-    Returns citywide correlations plus per-borough breakdowns.
     """
     if df.empty:
         return {"error": "Dataset not loaded."}
@@ -284,18 +419,15 @@ async def correlations():
     if not pollutant_cols or not outcome_cols:
         return {"error": "Not enough metric columns for correlation."}
 
-    # average each metric per neighborhood (collapses time)
     poll_avg = df.groupby("geo_place_name")[pollutant_cols].mean()
     out_avg  = df.groupby("geo_place_name")[outcome_cols].mean()
     combined = poll_avg.join(out_avg, how="inner")
 
-    # pairwise complete observations (pandas default for .corr())
     result: dict = {
         "method": "cross-sectional mean per neighborhood, Pearson r",
         "citywide": combined.corr().round(3).to_dict(),
     }
 
-    # per-borough: filter to only that borough's neighborhoods
     borough_lookup = (
         df[["geo_place_name", "borough"]]
         .dropna()

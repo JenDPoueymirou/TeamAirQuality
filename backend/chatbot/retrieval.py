@@ -3,9 +3,9 @@ chatbot/retrieval.py
 --------------------
 Hybrid retrieval layer — runs before every LLM call.
 
-Two search strategies run in parallel and their results are merged:
-  1. Structured filter  — keyword + regex scan → pandas DataFrame filter
-  2. Semantic search    — local embedding → ChromaDB vector search
+Two search strategies run on every query and results are merged:
+  1. Structured filter  — keyword + regex scan -> pandas DataFrame filter
+  2. Semantic search    — local embedding -> ChromaDB vector search
 
 This is what makes the chatbot grounded. The LLM never sees the full
 dataset — only the 6-8 most relevant rows for the current question.
@@ -33,9 +33,9 @@ _embed_model = None
 
 def init_retrieval(df: pd.DataFrame, collection, embed_model) -> None:
     """
-    Store the data dependencies in module state.
-    Called once from main.py lifespan so the chat endpoint can call
-    retrieve(query) without threading these objects through every layer.
+    Store data dependencies in module state.
+    Called once from main.py lifespan so retrieve() needs no arguments
+    beyond the query string.
     """
     global _df, _collection, _embed_model
     _df = df
@@ -48,35 +48,32 @@ def init_retrieval(df: pd.DataFrame, collection, embed_model) -> None:
 def extract_filters(query: str) -> dict:
     """
     Scan the user's question for structured clues without an LLM.
-    Returns only keys that were actually detected — empty dict if nothing found.
+    Returns only keys actually detected — empty dict if nothing found.
 
     Detects:
-      - borough name (from known list, case-insensitive)
-      - neighborhood name (from UHF42 list, case-insensitive)
-      - 4-digit year (2000–2029)
-      - 5-digit NYC ZIP code (starts with 1)
+      borough      — one or more names from BOROUGHS (str if one, list if many)
+      neighborhood — first match from UHF_NEIGHBORHOODS list
+      year         — 4-digit year in range 2005-2024
+      zip_code     — 5-digit NYC ZIP starting with 1
     """
     q = query.lower().strip()
     filters: dict = {}
 
-    # Borough detection
-    for borough in BOROUGHS:
-        if borough.lower() in q:
-            filters["borough"] = borough
-            break
+    detected = [b for b in BOROUGHS if b.lower() in q]
+    if len(detected) == 1:
+        filters["borough"] = detected[0]
+    elif len(detected) > 1:
+        filters["borough"] = detected  # list — handled downstream with isin / $in
 
-    # UHF neighborhood detection
     for neighborhood in UHF_NEIGHBORHOODS:
         if neighborhood in q:
             filters["neighborhood"] = neighborhood
             break
 
-    # Year detection
-    year_match = re.search(r"\b(20[0-2]\d)\b", q)
+    year_match = re.search(r"\b(20(?:0[5-9]|1\d|2[0-4]))\b", q)
     if year_match:
         filters["year"] = year_match.group(1)
 
-    # ZIP code detection (NYC ZIPs start with 1)
     zip_match = re.search(r"\b(1\d{4})\b", q)
     if zip_match:
         filters["zip_code"] = zip_match.group(1)
@@ -91,24 +88,22 @@ def extract_filters(query: str) -> dict:
 
 # ── Structured filter ──────────────────────────────────────────────────────────
 
-def apply_df_filters(
-    df: pd.DataFrame,
-    filters: dict,
-    top_n: int = STRUCT_K,
-) -> list[dict]:
+def structured_filter(filters: dict, top_n: int = STRUCT_K) -> list[dict]:
     """
     Filter the in-memory DataFrame using detected structured values.
-    Returns a list of row dicts — empty list if nothing matches or df is empty.
+    Returns [] if nothing matches or df is not loaded.
     """
-    if df.empty:
+    if _df.empty:
         return []
 
-    result = df.copy()
+    result = _df.copy()
 
     if "borough" in filters and "borough" in result.columns:
-        result = result[
-            result["borough"].str.lower() == filters["borough"].lower()
-        ]
+        b = filters["borough"]
+        if isinstance(b, list):
+            result = result[result["borough"].isin(b)]
+        else:
+            result = result[result["borough"].str.lower() == b.lower()]
 
     if "neighborhood" in filters and "geo_place_name" in result.columns:
         result = result[
@@ -118,15 +113,11 @@ def apply_df_filters(
         ]
 
     if "zip_code" in filters and "zip_code" in result.columns:
-        result = result[
-            result["zip_code"].astype(str) == filters["zip_code"]
-        ]
+        result = result[result["zip_code"].astype(str) == filters["zip_code"]]
 
     if "year" in filters and "time_period" in result.columns:
         result = result[
-            result["time_period"].astype(str).str.contains(
-                filters["year"], na=False
-            )
+            result["time_period"].astype(str).str.contains(filters["year"], na=False)
         ]
 
     return result.head(top_n).to_dict(orient="records")
@@ -134,37 +125,35 @@ def apply_df_filters(
 
 # ── Semantic search ────────────────────────────────────────────────────────────
 
-def vector_search(
-    query: str,
-    collection,
-    embed_model,
-    borough_filter: str | None = None,
-    top_k: int = VECTOR_K,
-) -> list[dict]:
+def vector_search(query: str, filters: dict, top_k: int = VECTOR_K) -> list[dict]:
     """
     Embed the query locally with sentence-transformers, then query ChromaDB
     for the most semantically similar stored rows.
 
-    Optionally applies a borough pre-filter using Chroma's where= clause
-    so semantic search stays scoped to the right geography.
+    Applies a borough pre-filter using Chroma's where= clause when one or
+    more boroughs were detected. Supports both single ($eq) and multi ($in).
 
-    Returns a list of metadata dicts (one per row).
+    Returns [] on any error — semantic search is non-fatal.
     """
-    if collection is None or embed_model is None:
+    if _collection is None or _embed_model is None:
         log.warning("Semantic search unavailable — collection or model not loaded")
         return []
 
     try:
-        query_vector = embed_model.encode([query]).tolist()
+        query_vector = _embed_model.encode([query]).tolist()
 
-        where = {}
-        if borough_filter:
-            where = {"borough": {"$eq": borough_filter}}
+        where = None
+        if "borough" in filters:
+            b = filters["borough"]
+            if isinstance(b, list):
+                where = {"borough": {"$in": b}}
+            else:
+                where = {"borough": {"$eq": b}}
 
-        results = collection.query(
+        results = _collection.query(
             query_embeddings=query_vector,
             n_results=top_k,
-            where=where if where else None,
+            where=where,
             include=["metadatas"],
         )
 
@@ -180,12 +169,8 @@ def vector_search(
 def format_row(row: dict, index: int) -> str:
     """
     Convert a raw data row into a labeled text chunk for the LLM prompt.
-    Only includes fields that are present and non-null.
-
-    Example output:
-      [Row 3] Borough: Bronx | Area: Hunts Point | ZIP: 10474 |
-              Period: 2019 | PM2.5: 18.2 | Asthma ER rate: 210.0 |
-              Cardio hosp rate: 145.3
+    Only fields that are present and non-null are included — no "None" in output.
+    ED rate fields (Issues #11/#12) are silently skipped when not yet populated.
     """
     field_map = [
         ("Borough",           "borough"),
@@ -199,8 +184,11 @@ def format_row(row: dict, index: int) -> str:
         ("PurpleAir PM2.5",   "purpleair_pm25"),
         ("Truck VMT",         "truck_vmt"),
         ("Asthma ER rate",    "asthma_er_rate"),
+        ("Asthma ED rate",    "asthma_ed_rate"),
         ("Cardio hosp rate",  "cardiovascular_hosp_rate"),
+        ("Cardio ED rate",    "cardiovascular_ed_rate"),
         ("Resp hosp rate",    "respiratory_hosp_rate"),
+        ("Resp ED rate",      "respiratory_ed_rate"),
         ("PM2.5 deaths",      "pm25_deaths"),
     ]
 
@@ -215,35 +203,23 @@ def format_row(row: dict, index: int) -> str:
 
 # ── Main retrieve function ─────────────────────────────────────────────────────
 
-def retrieve(
-    query: str,
-    df: pd.DataFrame,
-    collection,
-    embed_model,
-) -> tuple[list[str], dict]:
+def retrieve(query: str) -> tuple[list[str], dict, int]:
     """
     Entry point for all retrieval. Called by the /chat endpoint before
     every LLM call.
 
     Returns:
-      chunks  — list of formatted [Row N] strings ready to inject into the prompt
-      filters — the structured filters that were detected (for logging)
+      chunks    — formatted [Row N] strings ready to inject into the prompt
+      filters   — detected structured filters (for logging / debug)
+      row_count — number of unique rows returned (capped at TOP_K)
     """
     filters = extract_filters(query)
 
-    # Structured rows from CSV
-    struct_rows = apply_df_filters(df, filters, top_n=STRUCT_K)
+    struct_rows = structured_filter(filters)
+    vector_rows = vector_search(query, filters)
 
-    # Semantic rows from ChromaDB
-    vector_rows = vector_search(
-        query=query,
-        collection=collection,
-        embed_model=embed_model,
-        borough_filter=filters.get("borough"),
-        top_k=VECTOR_K,
-    )
-
-    # Merge and deduplicate on (geo_place_name + time_period)
+    # Merge, deduplicating on (geo_place_name + time_period).
+    # Structured rows go first — higher confidence than semantic matches.
     seen: set = set()
     combined: list[dict] = []
 
@@ -257,11 +233,8 @@ def retrieve(
             seen.add(key)
             combined.append(row)
 
-    # Cap at TOP_K and format
-    chunks = [
-        format_row(row, i + 1)
-        for i, row in enumerate(combined[:TOP_K])
-    ]
+    top = combined[:TOP_K]
+    chunks = [format_row(row, i + 1) for i, row in enumerate(top)]
 
     log.info(
         "Retrieved %d chunks (%d structured, %d semantic) for query: '%s...'",
@@ -271,4 +244,4 @@ def retrieve(
         query[:60],
     )
 
-    return chunks, filters
+    return chunks, filters, len(chunks)
