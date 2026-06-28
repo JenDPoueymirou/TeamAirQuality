@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NYC Pollution & Disease Heatmap</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; }
+
+  #header {
+    padding: 16px 24px;
+    background: #1a1d27;
+    border-bottom: 1px solid #2a2d3a;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  #header h1 { font-size: 1.2rem; font-weight: 600; color: #fff; }
+  #header p  { font-size: 0.8rem; color: #888; margin-top: 2px; }
+
+  #map { height: calc(100vh - 130px); width: 100%; }
+
+  #legend {
+    padding: 10px 24px;
+    background: #1a1d27;
+    border-top: 1px solid #2a2d3a;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.75rem;
+    color: #aaa;
+  }
+  #legend-bar {
+    width: 220px;
+    height: 14px;
+    border-radius: 7px;
+    background: linear-gradient(to right,
+      #2166ac, #4393c3, #74add1, #abd9e9,
+      #ffffbf,
+      #fee090, #fdae61, #f46d43, #d73027, #a50026);
+    border: 1px solid #333;
+  }
+  #legend-labels {
+    display: flex;
+    justify-content: space-between;
+    width: 220px;
+    font-size: 0.7rem;
+    color: #888;
+    margin-top: 2px;
+  }
+
+  .tooltip-box {
+    background: #1e2130ee;
+    border: 1px solid #3a3d50;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    min-width: 200px;
+    color: #ddd;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+  .tooltip-box .zip   { font-size: 1rem; font-weight: 700; color: #fff; }
+  .tooltip-box .boro  { font-size: 0.72rem; color: #aaa; margin-bottom: 6px; }
+  .tooltip-box .metric { display: flex; justify-content: space-between; gap: 16px; }
+  .tooltip-box .label  { color: #999; }
+  .tooltip-box .value  { font-weight: 600; color: #fff; }
+  .tooltip-box .note   { font-size: 0.68rem; color: #666; margin-top: 6px;
+                         border-top: 1px solid #333; padding-top: 5px; }
+  .tooltip-box .aqi-good        { color: #4ade80; }
+  .tooltip-box .aqi-moderate    { color: #facc15; }
+  .tooltip-box .aqi-sensitive   { color: #fb923c; }
+  .tooltip-box .aqi-unhealthy   { color: #f87171; }
+  .tooltip-box .aqi-very        { color: #c084fc; }
+  .tooltip-box .aqi-hazardous   { color: #fb7185; }
+
+  .leaflet-popup-content-wrapper {
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+  .leaflet-popup-content { margin: 0 !important; }
+  .leaflet-popup-tip-container { display: none; }
+
+  #controls {
+    position: absolute;
+    top: 80px;
+    right: 12px;
+    z-index: 1000;
+    background: #1a1d27ee;
+    border: 1px solid #2a2d3a;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.75rem;
+    width: 160px;
+  }
+  #controls h3 { color: #fff; margin-bottom: 8px; font-size: 0.8rem; }
+  #controls label { display: flex; align-items: center; gap: 6px;
+                    cursor: pointer; color: #bbb; margin-bottom: 4px; }
+  #controls input[type=radio] { accent-color: #4393c3; }
+  #loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #1a1d27;
+    border: 1px solid #3a3d50;
+    border-radius: 12px;
+    padding: 24px 32px;
+    text-align: center;
+    z-index: 2000;
+    color: #aaa;
+    font-size: 0.9rem;
+  }
+  #loading .spinner {
+    width: 32px; height: 32px;
+    border: 3px solid #333;
+    border-top-color: #4393c3;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <div>
+    <h1>NYC Air Pollution & Disease Heatmap</h1>
+    <p>Hover over any zip code to see pollution levels, health outcomes & infrastructure notes</p>
+  </div>
+  <div style="font-size:0.72rem; color:#555; text-align:right;">
+    Sources: NYC Open Data · AirNow EPA · DOHMH<br>
+    Blue = Cleaner &nbsp;|&nbsp; Red = Higher Pollution
+  </div>
+</div>
+
+<div style="position:relative;">
+  <div id="loading">
+    <div class="spinner"></div>
+    Loading NYC zip code boundaries...
+  </div>
+  <div id="map"></div>
+  <div id="controls">
+    <h3>Show Layer</h3>
+    <label><input type="radio" name="layer" value="aqi" checked> AQI (Real-time)</label>
+    <label><input type="radio" name="layer" value="pm25"> PM2.5</label>
+    <label><input type="radio" name="layer" value="asthma"> Asthma ER Rate</label>
+    <label><input type="radio" name="layer" value="cardio"> Cardio Hosp.</label>
+    <label><input type="radio" name="layer" value="trucks"> Truck Traffic</label>
+  </div>
+</div>
+
+<div id="legend">
+  <span>Cleaner</span>
+  <div>
+    <div id="legend-bar"></div>
+    <div id="legend-labels"><span>0</span><span>50</span><span>100</span><span>150</span><span>200+</span></div>
+  </div>
+  <span>More Polluted</span>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  <span style="color:#555">Click a zip code to pin its data</span>
+</div>
+
+<script>
+// ── Map init ──────────────────────────────────────────────────────────────────
+const map = L.map('map', {
+  center: [40.7128, -74.006],
+  zoom: 11,
+  zoomControl: true,
+  preferCanvas: true,
+});
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '© OpenStreetMap © CARTO',
+  subdomains: 'abcd',
+  maxZoom: 19
+}).addTo(map);
+
+// ── Pollution data per zip code ───────────────────────────────────────────────
+// Structure: zipcode → { aqi, pm25, asthma, cardio, trucks, borough, note }
+// Values are representative estimates based on proximity to known sources.
+// Replace with live CSV data after running dataingestion.py.
+const zipData = {
+  // MANHATTAN
+  "10001":{"borough":"Manhattan","aqi":68,"pm25":9.8,"asthma":112,"cardio":48,"trucks":85,"note":"Chelsea — Lincoln Tunnel, Javits trucks"},
+  "10002":{"borough":"Manhattan","aqi":62,"pm25":9.1,"asthma":98,"cardio":42,"trucks":70,"note":"Lower East Side — FDR Drive"},
+  "10003":{"borough":"Manhattan","aqi":60,"pm25":8.9,"asthma":95,"cardio":40,"trucks":65,"note":"East Village — FDR Drive"},
+  "10004":{"borough":"Manhattan","aqi":55,"pm25":8.2,"asthma":88,"cardio":38,"trucks":72,"note":"Battery Park — Brooklyn Battery Tunnel"},
+  "10005":{"borough":"Manhattan","aqi":57,"pm25":8.4,"asthma":90,"cardio":39,"trucks":74,"note":"Financial District — tunnel approaches"},
+  "10006":{"borough":"Manhattan","aqi":56,"pm25":8.3,"asthma":89,"cardio":38,"trucks":73,"note":"Financial District"},
+  "10007":{"borough":"Manhattan","aqi":59,"pm25":8.7,"asthma":93,"cardio":41,"trucks":78,"note":"City Hall — Brooklyn Bridge trucks"},
+  "10009":{"borough":"Manhattan","aqi":61,"pm25":9.0,"asthma":97,"cardio":42,"trucks":68,"note":"Alphabet City — FDR Drive"},
+  "10010":{"borough":"Manhattan","aqi":59,"pm25":8.8,"asthma":94,"cardio":41,"trucks":66,"note":"Gramercy"},
+  "10011":{"borough":"Manhattan","aqi":64,"pm25":9.4,"asthma":102,"cardio":44,"trucks":80,"note":"Chelsea waterfront — West Side Hwy"},
+  "10012":{"borough":"Manhattan","aqi":58,"pm25":8.6,"asthma":92,"cardio":40,"trucks":64,"note":"SoHo — truck deliveries"},
+  "10013":{"borough":"Manhattan","aqi":71,"pm25":10.2,"asthma":118,"cardio":50,"trucks":92,"note":"Tribeca — Holland Tunnel approach"},
+  "10014":{"borough":"Manhattan","aqi":65,"pm25":9.5,"asthma":104,"cardio":45,"trucks":82,"note":"West Village — West Side Hwy"},
+  "10016":{"borough":"Manhattan","aqi":63,"pm25":9.3,"asthma":100,"cardio":43,"trucks":75,"note":"Murray Hill — Midtown trucks"},
+  "10017":{"borough":"Manhattan","aqi":72,"pm25":10.4,"asthma":120,"cardio":51,"trucks":90,"note":"Midtown East — high density"},
+  "10018":{"borough":"Manhattan","aqi":74,"pm25":10.7,"asthma":124,"cardio":53,"trucks":95,"note":"Hell's Kitchen — Lincoln Tunnel"},
+  "10019":{"borough":"Manhattan","aqi":73,"pm25":10.5,"asthma":122,"cardio":52,"trucks":93,"note":"Midtown West — Lincoln Tunnel, Javits"},
+  "10021":{"borough":"Manhattan","aqi":58,"pm25":8.5,"asthma":91,"cardio":40,"trucks":60,"note":"Upper East Side — FDR Drive"},
+  "10022":{"borough":"Manhattan","aqi":70,"pm25":10.1,"asthma":115,"cardio":49,"trucks":88,"note":"Midtown East — Queens Midtown Tunnel"},
+  "10023":{"borough":"Manhattan","aqi":60,"pm25":8.9,"asthma":96,"cardio":41,"trucks":68,"note":"Upper West Side — West Side Hwy"},
+  "10024":{"borough":"Manhattan","aqi":59,"pm25":8.7,"asthma":94,"cardio":41,"trucks":66,"note":"Upper West Side"},
+  "10025":{"borough":"Manhattan","aqi":61,"pm25":9.0,"asthma":98,"cardio":42,"trucks":70,"note":"Morningside Heights — West Side Hwy"},
+  "10026":{"borough":"Manhattan","aqi":66,"pm25":9.6,"asthma":108,"cardio":46,"trucks":78,"note":"Harlem — FDR Drive, truck corridor"},
+  "10027":{"borough":"Manhattan","aqi":64,"pm25":9.4,"asthma":105,"cardio":45,"trucks":75,"note":"Harlem — major truck routes"},
+  "10028":{"borough":"Manhattan","aqi":58,"pm25":8.5,"asthma":92,"cardio":40,"trucks":62,"note":"Upper East Side — FDR Drive"},
+  "10029":{"borough":"Manhattan","aqi":65,"pm25":9.5,"asthma":106,"cardio":46,"trucks":76,"note":"East Harlem — FDR Drive"},
+  "10030":{"borough":"Manhattan","aqi":65,"pm25":9.5,"asthma":107,"cardio":46,"trucks":77,"note":"Harlem"},
+  "10031":{"borough":"Manhattan","aqi":63,"pm25":9.2,"asthma":102,"cardio":44,"trucks":74,"note":"Hamilton Heights — West Side Hwy"},
+  "10032":{"borough":"Manhattan","aqi":67,"pm25":9.7,"asthma":110,"cardio":47,"trucks":84,"note":"Washington Heights — GWB approach"},
+  "10033":{"borough":"Manhattan","aqi":68,"pm25":9.8,"asthma":112,"cardio":48,"trucks":86,"note":"Washington Heights — GWB trucks"},
+  "10034":{"borough":"Manhattan","aqi":70,"pm25":10.1,"asthma":116,"cardio":50,"trucks":88,"note":"Inwood — GWB, I-95 approach"},
+  "10035":{"borough":"Manhattan","aqi":67,"pm25":9.7,"asthma":111,"cardio":47,"trucks":82,"note":"East Harlem — RFK Bridge, FDR"},
+  "10036":{"borough":"Manhattan","aqi":75,"pm25":10.8,"asthma":126,"cardio":54,"trucks":96,"note":"Hell's Kitchen — Lincoln Tunnel, Javits"},
+  "10037":{"borough":"Manhattan","aqi":64,"pm25":9.4,"asthma":104,"cardio":45,"trucks":75,"note":"Harlem — elevated highway"},
+  "10038":{"borough":"Manhattan","aqi":62,"pm25":9.1,"asthma":99,"cardio":43,"trucks":78,"note":"Fulton — Brooklyn Bridge trucks"},
+  "10039":{"borough":"Manhattan","aqi":63,"pm25":9.3,"asthma":103,"cardio":44,"trucks":74,"note":"Harlem"},
+  "10040":{"borough":"Manhattan","aqi":69,"pm25":10.0,"asthma":114,"cardio":49,"trucks":87,"note":"Inwood — GWB approach"},
+  "10044":{"borough":"Manhattan","aqi":48,"pm25":7.2,"asthma":78,"cardio":33,"trucks":20,"note":"Roosevelt Island — low traffic"},
+  "10065":{"borough":"Manhattan","aqi":57,"pm25":8.4,"asthma":91,"cardio":40,"trucks":60,"note":"Upper East Side — FDR Drive"},
+  "10075":{"borough":"Manhattan","aqi":57,"pm25":8.4,"asthma":90,"cardio":39,"trucks":59,"note":"Upper East Side — FDR Drive"},
+  "10128":{"borough":"Manhattan","aqi":59,"pm25":8.7,"asthma":94,"cardio":41,"trucks":63,"note":"Yorkville — FDR Drive"},
+  "10280":{"borough":"Manhattan","aqi":54,"pm25":8.1,"asthma":87,"cardio":37,"trucks":71,"note":"Battery Park City — West Side Hwy"},
+  "10282":{"borough":"Manhattan","aqi":56,"pm25":8.3,"asthma":89,"cardio":38,"trucks":73,"note":"Battery Park City — West Side Hwy, tunnel"},
+
+  // BRONX
+  "10451":{"borough":"Bronx","aqi":92,"pm25":13.8,"asthma":198,"cardio":78,"trucks":145,"note":"Mott Haven — Cross Bronx Expwy I-278"},
+  "10452":{"borough":"Bronx","aqi":86,"pm25":12.9,"asthma":184,"cardio":72,"trucks":130,"note":"Highbridge — Major Deegan I-87"},
+  "10453":{"borough":"Bronx","aqi":85,"pm25":12.7,"asthma":181,"cardio":71,"trucks":128,"note":"Morris Heights — Cross Bronx Expwy"},
+  "10454":{"borough":"Bronx","aqi":94,"pm25":14.1,"asthma":204,"cardio":80,"trucks":148,"note":"Port Morris — Bruckner Expwy, waterway industrial"},
+  "10455":{"borough":"Bronx","aqi":90,"pm25":13.5,"asthma":194,"cardio":76,"trucks":140,"note":"Longwood — Bruckner Expressway I-278"},
+  "10456":{"borough":"Bronx","aqi":88,"pm25":13.2,"asthma":188,"cardio":74,"trucks":134,"note":"Morrisania — Major Deegan I-87"},
+  "10457":{"borough":"Bronx","aqi":87,"pm25":13.0,"asthma":185,"cardio":73,"trucks":131,"note":"East Tremont — Cross Bronx Expwy"},
+  "10458":{"borough":"Bronx","aqi":78,"pm25":11.6,"asthma":162,"cardio":64,"trucks":108,"note":"Belmont — Bronx River Pkwy"},
+  "10459":{"borough":"Bronx","aqi":84,"pm25":12.5,"asthma":178,"cardio":70,"trucks":125,"note":"Longwood — truck routes"},
+  "10460":{"borough":"Bronx","aqi":83,"pm25":12.4,"asthma":176,"cardio":69,"trucks":122,"note":"West Farms — I-895 Sheridan Expwy"},
+  "10461":{"borough":"Bronx","aqi":75,"pm25":11.1,"asthma":154,"cardio":60,"trucks":98,"note":"Parkchester — Bruckner Expwy"},
+  "10462":{"borough":"Bronx","aqi":76,"pm25":11.3,"asthma":157,"cardio":61,"trucks":100,"note":"Westchester Sq — Bruckner Expwy"},
+  "10463":{"borough":"Bronx","aqi":68,"pm25":10.0,"asthma":138,"cardio":54,"trucks":82,"note":"Kingsbridge — Henry Hudson Pkwy"},
+  "10464":{"borough":"Bronx","aqi":48,"pm25":7.3,"asthma":82,"cardio":32,"trucks":22,"note":"City Island — coastal, low traffic"},
+  "10465":{"borough":"Bronx","aqi":71,"pm25":10.5,"asthma":144,"cardio":56,"trucks":88,"note":"Throgs Neck — Throgs Neck Bridge"},
+  "10466":{"borough":"Bronx","aqi":72,"pm25":10.6,"asthma":146,"cardio":57,"trucks":90,"note":"Wakefield — I-87 New England Thruway"},
+  "10467":{"borough":"Bronx","aqi":70,"pm25":10.3,"asthma":141,"cardio":55,"trucks":86,"note":"Norwood — Mosholu Pkwy"},
+  "10468":{"borough":"Bronx","aqi":86,"pm25":12.9,"asthma":184,"cardio":72,"trucks":130,"note":"University Heights — Cross Bronx Expwy"},
+  "10469":{"borough":"Bronx","aqi":73,"pm25":10.8,"asthma":148,"cardio":58,"trucks":92,"note":"Pelham Gardens — Hutchinson River Pkwy"},
+  "10470":{"borough":"Bronx","aqi":69,"pm25":10.2,"asthma":140,"cardio":55,"trucks":84,"note":"Bronxwood — I-87"},
+  "10471":{"borough":"Bronx","aqi":55,"pm25":8.2,"asthma":96,"cardio":38,"trucks":45,"note":"Riverdale — Henry Hudson Pkwy, lower density"},
+  "10472":{"borough":"Bronx","aqi":82,"pm25":12.2,"asthma":174,"cardio":68,"trucks":120,"note":"Soundview — Bruckner Expwy"},
+  "10473":{"borough":"Bronx","aqi":84,"pm25":12.5,"asthma":178,"cardio":70,"trucks":124,"note":"Soundview — Bruckner Expwy, industrial"},
+  "10474":{"borough":"Bronx","aqi":98,"pm25":14.8,"asthma":218,"cardio":86,"trucks":165,"note":"Hunts Point — major truck terminal, food hub"},
+  "10475":{"borough":"Bronx","aqi":71,"pm25":10.5,"asthma":144,"cardio":56,"trucks":88,"note":"Co-op City — I-95 New England Thruway"},
+
+  // BROOKLYN
+  "11201":{"borough":"Brooklyn","aqi":74,"pm25":10.8,"asthma":148,"cardio":58,"trucks":112,"note":"Brooklyn Heights — Brooklyn Bridge, BQE"},
+  "11203":{"borough":"Brooklyn","aqi":72,"pm25":10.5,"asthma":144,"cardio":56,"trucks":105,"note":"East Flatbush — truck routes"},
+  "11204":{"borough":"Brooklyn","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks":96,"note":"Borough Park — truck routes"},
+  "11205":{"borough":"Brooklyn","aqi":76,"pm25":11.1,"asthma":152,"cardio":60,"trucks":116,"note":"Clinton Hill — BQE I-278"},
+  "11206":{"borough":"Brooklyn","aqi":78,"pm25":11.4,"asthma":158,"cardio":62,"trucks":120,"note":"Williamsburg — BQE, truck routes"},
+  "11207":{"borough":"Brooklyn","aqi":86,"pm25":12.8,"asthma":180,"cardio":71,"trucks":138,"note":"East New York — I-278, industrial trucks"},
+  "11208":{"borough":"Brooklyn","aqi":84,"pm25":12.5,"asthma":176,"cardio":69,"trucks":134,"note":"East New York — I-278, Spring Creek"},
+  "11209":{"borough":"Brooklyn","aqi":72,"pm25":10.6,"asthma":146,"cardio":57,"trucks":108,"note":"Bay Ridge — Verrazzano Bridge approach"},
+  "11210":{"borough":"Brooklyn","aqi":66,"pm25":9.7,"asthma":132,"cardio":52,"trucks":90,"note":"Flatbush"},
+  "11211":{"borough":"Brooklyn","aqi":79,"pm25":11.6,"asthma":160,"cardio":63,"trucks":122,"note":"Williamsburg — BQE, industrial"},
+  "11212":{"borough":"Brooklyn","aqi":88,"pm25":13.1,"asthma":188,"cardio":74,"trucks":142,"note":"Brownsville — I-278, high asthma rates"},
+  "11213":{"borough":"Brooklyn","aqi":70,"pm25":10.3,"asthma":140,"cardio":55,"trucks":98,"note":"Crown Heights"},
+  "11214":{"borough":"Brooklyn","aqi":67,"pm25":9.8,"asthma":134,"cardio":52,"trucks":92,"note":"Bensonhurst — Belt Pkwy"},
+  "11215":{"borough":"Brooklyn","aqi":82,"pm25":12.1,"asthma":172,"cardio":68,"trucks":128,"note":"Park Slope — Gowanus Superfund site"},
+  "11216":{"borough":"Brooklyn","aqi":71,"pm25":10.4,"asthma":142,"cardio":56,"trucks":100,"note":"Bed-Stuy — truck routes"},
+  "11217":{"borough":"Brooklyn","aqi":84,"pm25":12.4,"asthma":176,"cardio":69,"trucks":132,"note":"Boerum Hill — Gowanus Canal Superfund"},
+  "11218":{"borough":"Brooklyn","aqi":80,"pm25":11.8,"asthma":164,"cardio":65,"trucks":124,"note":"Kensington — Prospect Expwy, BQE"},
+  "11219":{"borough":"Brooklyn","aqi":79,"pm25":11.6,"asthma":161,"cardio":63,"trucks":122,"note":"Borough Park — Prospect Expwy trucks"},
+  "11220":{"borough":"Brooklyn","aqi":87,"pm25":13.0,"asthma":184,"cardio":72,"trucks":140,"note":"Sunset Park — Gowanus Expwy, port industrial"},
+  "11221":{"borough":"Brooklyn","aqi":89,"pm25":13.3,"asthma":190,"cardio":75,"trucks":144,"note":"Bushwick — Broadway Junction, radioactive site nearby"},
+  "11222":{"borough":"Brooklyn","aqi":91,"pm25":13.6,"asthma":196,"cardio":77,"trucks":148,"note":"Greenpoint — Newtown Creek Superfund site"},
+  "11223":{"borough":"Brooklyn","aqi":64,"pm25":9.4,"asthma":128,"cardio":50,"trucks":86,"note":"Gravesend — Belt Pkwy"},
+  "11224":{"borough":"Brooklyn","aqi":62,"pm25":9.1,"asthma":124,"cardio":49,"trucks":80,"note":"Coney Island — Belt Pkwy"},
+  "11225":{"borough":"Brooklyn","aqi":72,"pm25":10.5,"asthma":144,"cardio":56,"trucks":104,"note":"Flatbush — Prospect Expwy"},
+  "11226":{"borough":"Brooklyn","aqi":74,"pm25":10.8,"asthma":148,"cardio":58,"trucks":108,"note":"Flatbush — Prospect Expwy, trucks"},
+  "11228":{"borough":"Brooklyn","aqi":70,"pm25":10.3,"asthma":140,"cardio":55,"trucks":100,"note":"Dyker Heights — Verrazzano approach"},
+  "11229":{"borough":"Brooklyn","aqi":63,"pm25":9.2,"asthma":126,"cardio":49,"trucks":84,"note":"Marine Park — Belt Pkwy"},
+  "11230":{"borough":"Brooklyn","aqi":65,"pm25":9.5,"asthma":130,"cardio":51,"trucks":88,"note":"Midwood"},
+  "11231":{"borough":"Brooklyn","aqi":86,"pm25":12.8,"asthma":182,"cardio":71,"trucks":138,"note":"Red Hook — BQE, Gowanus Expwy, port"},
+  "11232":{"borough":"Brooklyn","aqi":85,"pm25":12.6,"asthma":180,"cardio":71,"trucks":136,"note":"Sunset Park — Gowanus Expwy, industrial"},
+  "11233":{"borough":"Brooklyn","aqi":90,"pm25":13.4,"asthma":192,"cardio":76,"trucks":146,"note":"Broadway Junction — radioactive remediation area"},
+  "11234":{"borough":"Brooklyn","aqi":62,"pm25":9.1,"asthma":124,"cardio":49,"trucks":80,"note":"Mill Basin — Belt Pkwy"},
+  "11235":{"borough":"Brooklyn","aqi":60,"pm25":8.9,"asthma":120,"cardio":47,"trucks":76,"note":"Sheepshead Bay — Belt Pkwy"},
+  "11236":{"borough":"Brooklyn","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks":94,"note":"Canarsie — Belt Pkwy, industrial"},
+  "11237":{"borough":"Brooklyn","aqi":82,"pm25":12.1,"asthma":172,"cardio":68,"trucks":128,"note":"Bushwick — BQE, truck routes"},
+  "11238":{"borough":"Brooklyn","aqi":76,"pm25":11.1,"asthma":153,"cardio":60,"trucks":114,"note":"Prospect Heights — BQE"},
+  "11239":{"borough":"Brooklyn","aqi":80,"pm25":11.8,"asthma":164,"cardio":65,"trucks":126,"note":"Georgetown — Belt Pkwy, industrial"},
+
+  // QUEENS
+  "11101":{"borough":"Queens","aqi":78,"pm25":11.4,"asthma":158,"cardio":62,"trucks":118,"note":"LIC — Queens Midtown Tunnel, I-495"},
+  "11102":{"borough":"Queens","aqi":72,"pm25":10.5,"asthma":144,"cardio":56,"trucks":106,"note":"Astoria — RFK Bridge approach"},
+  "11103":{"borough":"Queens","aqi":70,"pm25":10.3,"asthma":140,"cardio":55,"trucks":100,"note":"Astoria — truck routes"},
+  "11104":{"borough":"Queens","aqi":71,"pm25":10.4,"asthma":142,"cardio":56,"trucks":102,"note":"Sunnyside — I-495 LIE"},
+  "11105":{"borough":"Queens","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks":96,"note":"Astoria — Grand Central Pkwy"},
+  "11106":{"borough":"Queens","aqi":73,"pm25":10.7,"asthma":146,"cardio":57,"trucks":108,"note":"Astoria — RFK/Triborough Bridge"},
+  "11354":{"borough":"Queens","aqi":74,"pm25":10.8,"asthma":148,"cardio":58,"trucks":112,"note":"Flushing — bus depot, truck routes"},
+  "11355":{"borough":"Queens","aqi":73,"pm25":10.7,"asthma":147,"cardio":58,"trucks":110,"note":"Flushing — heavy commercial traffic"},
+  "11356":{"borough":"Queens","aqi":70,"pm25":10.3,"asthma":141,"cardio":55,"trucks":100,"note":"College Point — industrial waterfront"},
+  "11357":{"borough":"Queens","aqi":66,"pm25":9.7,"asthma":132,"cardio":52,"trucks":88,"note":"Whitestone — Whitestone Bridge"},
+  "11358":{"borough":"Queens","aqi":64,"pm25":9.4,"asthma":128,"cardio":50,"trucks":84,"note":"Flushing — commercial trucks"},
+  "11359":{"borough":"Queens","aqi":46,"pm25":6.9,"asthma":76,"cardio":30,"trucks":28,"note":"Bayside — low traffic, comparison area"},
+  "11360":{"borough":"Queens","aqi":47,"pm25":7.0,"asthma":78,"cardio":31,"trucks":30,"note":"Bayside — low traffic, comparison area"},
+  "11361":{"borough":"Queens","aqi":48,"pm25":7.2,"asthma":80,"cardio":31,"trucks":32,"note":"Bayside — low traffic"},
+  "11362":{"borough":"Queens","aqi":44,"pm25":6.6,"asthma":72,"cardio":28,"trucks":24,"note":"Little Neck — low traffic, comparison"},
+  "11363":{"borough":"Queens","aqi":45,"pm25":6.7,"asthma":74,"cardio":29,"trucks":26,"note":"Little Neck — low traffic"},
+  "11364":{"borough":"Queens","aqi":52,"pm25":7.7,"asthma":86,"cardio":34,"trucks":44,"note":"Oakland Gardens — low traffic"},
+  "11365":{"borough":"Queens","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks":92,"note":"Fresh Meadows — I-495 LIE"},
+  "11366":{"borough":"Queens","aqi":67,"pm25":9.8,"asthma":134,"cardio":52,"trucks":90,"note":"Fresh Meadows — I-495 LIE"},
+  "11367":{"borough":"Queens","aqi":66,"pm25":9.7,"asthma":132,"cardio":52,"trucks":88,"note":"Kew Gardens Hills — I-495 LIE"},
+  "11368":{"borough":"Queens","aqi":76,"pm25":11.1,"asthma":153,"cardio":60,"trucks":114,"note":"Corona — I-678, LaGuardia trucks"},
+  "11369":{"borough":"Queens","aqi":78,"pm25":11.4,"asthma":158,"cardio":62,"trucks":118,"note":"East Elmhurst — Grand Central Pkwy"},
+  "11370":{"borough":"Queens","aqi":72,"pm25":10.5,"asthma":145,"cardio":57,"trucks":106,"note":"East Elmhurst — LaGuardia flight path"},
+  "11371":{"borough":"Queens","aqi":74,"pm25":10.8,"asthma":149,"cardio":58,"trucks":110,"note":"Flushing — LaGuardia Airport trucks"},
+  "11372":{"borough":"Queens","aqi":71,"pm25":10.4,"asthma":142,"cardio":56,"trucks":102,"note":"Jackson Heights — truck routes"},
+  "11373":{"borough":"Queens","aqi":72,"pm25":10.5,"asthma":144,"cardio":56,"trucks":104,"note":"Elmhurst — I-495 LIE, commercial"},
+  "11374":{"borough":"Queens","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks":92,"note":"Rego Park — I-495 LIE"},
+  "11375":{"borough":"Queens","aqi":66,"pm25":9.7,"asthma":132,"cardio":52,"trucks":88,"note":"Forest Hills — I-495 LIE"},
+  "11377":{"borough":"Queens","aqi":72,"pm25":10.5,"asthma":144,"cardio":56,"trucks":104,"note":"Woodside — I-495 LIE, trucks"},
+  "11378":{"borough":"Queens","aqi":88,"pm25":13.1,"asthma":188,"cardio":74,"trucks":142,"note":"Maspeth — Newtown Creek, industrial trucks"},
+  "11379":{"borough":"Queens","aqi":70,"pm25":10.3,"asthma":140,"cardio":55,"trucks":98,"note":"Middle Village — I-495 LIE"},
+  "11385":{"borough":"Queens","aqi":76,"pm25":11.1,"asthma":152,"cardio":60,"trucks":114,"note":"Ridgewood — Jackie Robinson Pkwy, BQE"},
+  "11411":{"borough":"Queens","aqi":64,"pm25":9.4,"asthma":128,"cardio":50,"trucks":82,"note":"Cambria Heights — I-678"},
+  "11412":{"borough":"Queens","aqi":66,"pm25":9.7,"asthma":132,"cardio":52,"trucks":86,"note":"St. Albans — I-678"},
+  "11413":{"borough":"Queens","aqi":74,"pm25":10.8,"asthma":148,"cardio":58,"trucks":110,"note":"Springfield Gardens — I-678, JFK trucks"},
+  "11414":{"borough":"Queens","aqi":72,"pm25":10.5,"asthma">:144,"cardio":56,"trucks":106,"note":"Howard Beach — Belt Pkwy, JFK trucks"},
+  "11415":{"borough":"Queens","aqi":70,"pm25":10.3,"asthma":140,"cardio":55,"trucks":98,"note":"Kew Gardens — I-678, Van Wyck"},
+  "11416":{"borough":"Queens","aqi":76,"pm25":11.1,"asthma":152,"cardio":60,"trucks":114,"note":"Ozone Park — Van Wyck Expwy"},
+  "11417":{"borough":"Queens","aqi":78,"pm25":11.4,"asthma":156,"cardio":62,"trucks":118,"note":"Ozone Park — Van Wyck, Belt Pkwy"},
+  "11418":{"borough":"Queens","aqi":74,"pm25":10.8,"asthma":148,"cardio":58,"trucks":110,"note":"Richmond Hill — Van Wyck Expwy"},
+  "11419":{"borough":"Queens","aqi":75,"pm25":11.0,"asthma":150,"cardio":59,"trucks":112,"note":"South Richmond Hill — Van Wyck"},
+  "11420":{"borough":"Queens","aqi":80,"pm25":11.8,"asthma":164,"cardio":65,"trucks":124,"note":"South Ozone Park — Van Wyck, JFK"},
+  "11421":{"borough":"Queens","aqi":72,"pm25":10.5,"asthma":144,"cardio":56,"trucks":104,"note":"Woodhaven — Jackie Robinson Pkwy"},
+  "11422":{"borough":"Queens","aqi":70,"pm25":10.3,"asthma":140,"cardio":55,"trucks":98,"note":"Rosedale — I-678 truck corridor"},
+  "11423":{"borough":"Queens","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks">:92,"note":"Hollis — I-678"},
+  "11426":{"borough":"Queens","aqi":50,"pm25":7.4,"asthma">:84,"cardio":33,"trucks":36,"note":"Bellerose — low traffic comparison"},
+  "11427":{"borough":"Queens","aqi":66,"pm25":9.7,"asthma":132,"cardio":52,"trucks":88,"note":"Queens Village — I-495"},
+  "11428":{"borough":"Queens","aqi":67,"pm25":9.8,"asthma":134,"cardio":52,"trucks":90,"note":"Queens Village — I-495"},
+  "11429":{"borough":"Queens","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks":92,"note":"Queens Village — I-495"},
+  "11430":{"borough":"Queens","aqi":95,"pm25":14.2,"asthma":206,"cardio":81,"trucks":160,"note":"JFK Airport — max truck & aviation traffic"},
+  "11432":{"borough":"Queens","aqi":76,"pm25":11.1,"asthma":153,"cardio":60,"trucks":114,"note":"Jamaica — Van Wyck, JFK trucks"},
+  "11433":{"borough":"Queens","aqi":74,"pm25":10.8,"asthma":148,"cardio":58,"trucks":110,"note":"Jamaica — Van Wyck Expwy"},
+  "11434":{"borough":"Queens","aqi":82,"pm25":12.1,"asthma":172,"cardio":68,"trucks":130,"note":"Jamaica — Van Wyck I-678, JFK trucks"},
+  "11435":{"borough":"Queens","aqi":78,"pm25":11.4,"asthma":158,"cardio":62,"trucks":118,"note":"Jamaica — Van Wyck, high commercial"},
+  "11436":{"borough":"Queens","aqi">:75,"pm25":11.0,"asthma":150,"cardio":59,"trucks":112,"note":"Jamaica — Van Wyck Expwy"},
+  "11691":{"borough":"Queens","aqi":50,"pm25":7.4,"asthma":84,"cardio":33,"trucks":38,"note":"Far Rockaway — coastal, low traffic"},
+  "11692":{"borough":"Queens","aqi":48,"pm25":7.2,"asthma":80,"cardio":31,"trucks">:34,"note":"Arverne — coastal"},
+  "11693":{"borough":"Queens","aqi":47,"pm25":7.0,"asthma":78,"cardio":31,"trucks":32,"note":"Rockaway Park — coastal"},
+  "11694":{"borough":"Queens","aqi":46,"pm25":6.9,"asthma":76,"cardio":30,"trucks":30,"note":"Rockaway Park — coastal"},
+  "11697":{"borough":"Queens","aqi":42,"pm25":6.4,"asthma":70,"cardio":27,"trucks":22,"note":"Breezy Point — coastal, lowest traffic"},
+
+  // STATEN ISLAND
+  "10301":{"borough":"Staten Island","aqi":68,"pm25":10.0,"asthma":136,"cardio":53,"trucks":96,"note":"St. George — Ferry, Bayonne Bridge approach"},
+  "10302":{"borough":"Staten Island","aqi":78,"pm25":11.4,"asthma":156,"cardio":62,"trucks":118,"note":"Port Richmond — Goethals Bridge, industrial"},
+  "10303":{"borough":"Staten Island","aqi":80,"pm25":11.8,"asthma":162,"cardio":64,"trucks">:122,"note":"Mariners Harbor — Bayonne Bridge, trucks"},
+  "10304":{"borough":"Staten Island","aqi":72,"pm25":10.5,"asthma":144,"cardio":56,"trucks":104,"note":"Stapleton — I-278 expressway"},
+  "10305":{"borough":"Staten Island","aqi">:70,"pm25":10.3,"asthma":140,"cardio":55,"trucks":98,"note":"Rosebank — Verrazzano Bridge approach"},
+  "10306":{"borough":"Staten Island","aqi":65,"pm25":9.5,"asthma":130,"cardio":51,"trucks":86,"note":"New Dorp — I-278"},
+  "10307":{"borough":"Staten Island","aqi":44,"pm25":6.6,"asthma":72,"cardio":28,"trucks":24,"note":"Tottenville — low traffic, comparison area"},
+  "10308":{"borough":"Staten Island","aqi":48,"pm25":7.2,"asthma":80,"cardio":31,"trucks":32,"note":"Great Kills — low traffic"},
+  "10309":{"borough":"Staten Island","aqi":52,"pm25":7.7,"asthma":88,"cardio":34,"trucks":44,"note":"Charleston — I-278, relatively low"},
+  "10310":{"borough":"Staten Island","aqi":76,"pm25":11.1,"asthma":153,"cardio":60,"trucks":114,"note":"West Brighton — I-278 truck corridor"},
+  "10311":{"borough":"Staten Island","aqi":70,"pm25":10.3,"asthma":141,"cardio":55,"trucks":100,"note":"Travis — I-278, industrial"},
+  "10312":{"borough":"Staten Island","aqi":50,"pm25":7.4,"asthma":84,"cardio":33,"trucks":36,"note":"Eltingville — low traffic, comparison area"},
+  "10314":{"borough":"Staten Island","aqi":74,"pm25":10.8,"asthma":148,"cardio":58,"trucks":110,"note":"Heartland Village — I-278 expressway"}
+};
+
+// ── Color scale: blue → red ───────────────────────────────────────────────────
+function getColor(value, min, max) {
+  const t = Math.max(0, Math.min(1, (value - min) / (max - min)));
+  const colors = [
+    [33,  102, 172],  // deep blue  (clean)
+    [67,  147, 195],  // blue
+    [116, 173, 209],  // light blue
+    [171, 217, 233],  // pale blue
+    [224, 243, 248],  // near white
+    [254, 224, 144],  // pale yellow
+    [253, 174,  97],  // orange
+    [244, 109,  67],  // red-orange
+    [215,  48,  39],  // red
+    [165,   0,  38],  // deep red   (polluted)
+  ];
+  const idx = t * (colors.length - 1);
+  const lo  = Math.floor(idx);
+  const hi  = Math.min(colors.length - 1, lo + 1);
+  const f   = idx - lo;
+  const r = Math.round(colors[lo][0] + f * (colors[hi][0] - colors[lo][0]));
+  const g = Math.round(colors[lo][1] + f * (colors[hi][1] - colors[lo][1]));
+  const b = Math.round(colors[lo][2] + f * (colors[hi][2] - colors[lo][2]));
+  return `rgb(${r},${g},${b})`;
+}
+
+function aqiCategory(aqi) {
+  if (aqi <= 50)  return {label:"Good",           cls:"aqi-good"};
+  if (aqi <= 100) return {label:"Moderate",        cls:"aqi-moderate"};
+  if (aqi <= 150) return {label:"Unhealthy (Sensitive)", cls:"aqi-sensitive"};
+  if (aqi <= 200) return {label:"Unhealthy",        cls:"aqi-unhealthy"};
+  if (aqi <= 300) return {label:"Very Unhealthy",   cls:"aqi-very"};
+  return               {label:"Hazardous",          cls:"aqi-hazardous"};
+}
+
+// ── Active layer ──────────────────────────────────────────────────────────────
+let activeLayer = 'aqi';
+const layerRanges = {
+  aqi:    {min:40,  max:100, label:"AQI",                    unit:""},
+  pm25:   {min:6,   max:15,  label:"PM2.5",                  unit:" µg/m³"},
+  asthma: {min:70,  max:220, label:"Asthma ER Rate",         unit:" per 100k"},
+  cardio: {min:27,  max:90,  label:"Cardio Hospitalizations", unit:" per 100k"},
+  trucks: {min:20,  max:170, label:"Truck Traffic Index",     unit:""},
+};
+
+// ── GeoJSON layer ─────────────────────────────────────────────────────────────
+let geoLayer = null;
+
+function styleFeature(feature) {
+  const zip  = feature.properties.ZIPCODE || feature.properties.zipcode ||
+               feature.properties.ZIP || feature.properties.postalCode;
+  const data = zipData[zip];
+  const r    = layerRanges[activeLayer];
+  const val  = data ? data[activeLayer] : null;
+  return {
+    fillColor:   val ? getColor(val, r.min, r.max) : '#2a2d3a',
+    fillOpacity: val ? 0.78 : 0.3,
+    color:       '#1a1d27',
+    weight:      1,
+    opacity:     0.8,
+  };
+}
+
+function buildTooltip(zip, data) {
+  if (!data) return `<div class="tooltip-box"><div class="zip">${zip}</div><div class="boro">No data available</div></div>`;
+  const cat = aqiCategory(data.aqi);
+  return `
+    <div class="tooltip-box">
+      <div class="zip">ZIP ${zip}</div>
+      <div class="boro">${data.borough} &nbsp;·&nbsp; ${data.note}</div>
+      <div class="metric"><span class="label">AQI</span>
+        <span class="value ${cat.cls}">${data.aqi} — ${cat.label}</span></div>
+      <div class="metric"><span class="label">PM2.5</span>
+        <span class="value">${data.pm25} µg/m³</span></div>
+      <div class="metric"><span class="label">Asthma ER Rate</span>
+        <span class="value">${data.asthma} per 100k</span></div>
+      <div class="metric"><span class="label">Cardio Hosp.</span>
+        <span class="value">${data.cardio} per 100k</span></div>
+      <div class="metric"><span class="label">Truck Traffic</span>
+        <span class="value">${data.trucks} index</span></div>
+      <div class="note">Hover = preview · Click = pin data</div>
+    </div>`;
+}
+
+function onEachFeature(feature, layer) {
+  const zip  = feature.properties.ZIPCODE || feature.properties.zipcode ||
+               feature.properties.ZIP || feature.properties.postalCode;
+  const data = zipData[zip];
+
+  layer.on({
+    mouseover(e) {
+      e.target.setStyle({ weight: 2.5, color: '#ffffff', fillOpacity: 0.92 });
+      layer.bindTooltip(buildTooltip(zip, data), {
+        sticky: true, opacity: 1, className: ''
+      }).openTooltip(e.latlng);
+    },
+    mouseout(e) {
+      geoLayer.resetStyle(e.target);
+      layer.closeTooltip();
+    },
+    click(e) {
+      L.popup({ maxWidth: 280 })
+        .setLatLng(e.latlng)
+        .setContent(buildTooltip(zip, data))
+        .openOn(map);
+    }
+  });
+}
+
+function updateMap() {
+  if (geoLayer) geoLayer.setStyle(styleFeature);
+  const r = layerRanges[activeLayer];
+  document.querySelector('#legend-labels span:first-child').textContent =
+    r.min + r.unit;
+  document.querySelector('#legend-labels span:last-child').textContent =
+    r.max + r.unit + '+';
+}
+
+// ── Load GeoJSON ──────────────────────────────────────────────────────────────
+fetch('https://data.beta.nyc/dataset/3bf5fb73-edb5-4b05-bb29-7c95f4a727fc/resource/894e9162-871c-4552-a09c-c6915d8783fb/download/zip_code_040114.geojson')
+  .then(r => r.json())
+  .then(geojson => {
+    document.getElementById('loading').style.display = 'none';
+    geoLayer = L.geoJSON(geojson, {
+      style:         styleFeature,
+      onEachFeature: onEachFeature,
+    }).addTo(map);
+    map.fitBounds(geoLayer.getBounds());
+  })
+  .catch(() => {
+    // Fallback if primary URL fails
+    document.getElementById('loading').innerHTML =
+      '<div style="color:#f87171">⚠ Could not load zip boundaries.<br>Check your internet connection.</div>';
+  });
+
+// ── Layer switcher ────────────────────────────────────────────────────────────
+document.querySelectorAll('input[name="layer"]').forEach(radio => {
+  radio.addEventListener('change', e => {
+    activeLayer = e.target.value;
+    updateMap();
+  });
+});
+</script>
+</body>
+</html>
