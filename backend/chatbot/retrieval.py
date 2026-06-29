@@ -135,6 +135,18 @@ def structured_filter(filters: dict, top_n: int = STRUCT_K) -> list[dict]:
 
 # ── Semantic search ────────────────────────────────────────────────────────────
 
+def _get_embed_model():
+    """Load the embedding model on first use (lazy) to keep startup fast."""
+    global _embed_model
+    if _embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        from chatbot.config import EMBED_MODEL as _EMBED_MODEL
+        log.info("Loading embedding model '%s' on first query...", _EMBED_MODEL)
+        _embed_model = SentenceTransformer(_EMBED_MODEL)
+        log.info("Embedding model ready")
+    return _embed_model
+
+
 def vector_search(query: str, filters: dict, top_k: int = VECTOR_K) -> list[dict]:
     """
     Embed the query locally with sentence-transformers, then query ChromaDB
@@ -145,12 +157,13 @@ def vector_search(query: str, filters: dict, top_k: int = VECTOR_K) -> list[dict
 
     Returns [] on any error — semantic search is non-fatal.
     """
-    if _collection is None or _embed_model is None:
-        log.warning("Semantic search unavailable — collection or model not loaded")
+    if _collection is None:
+        log.warning("Semantic search unavailable — collection not loaded")
         return []
 
     try:
-        query_vector = _embed_model.encode([query]).tolist()
+        embed_model = _get_embed_model()
+        query_vector = embed_model.encode([query]).tolist()
 
         where = None
         if "borough" in filters:

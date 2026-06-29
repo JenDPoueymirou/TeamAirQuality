@@ -24,7 +24,6 @@ import pandas as pd
 import chromadb
 from google import genai
 from google.genai import types
-from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -178,14 +177,10 @@ async def lifespan(app: FastAPI):
     collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
     print(f"[startup] ChromaDB ready — {collection.count()} vectors")
 
-    # 3. Load embedding model
-    print(f"[startup] Loading embedding model '{EMBED_MODEL}'...")
-    embed_model = SentenceTransformer(EMBED_MODEL)
-    print("[startup] Embedding model ready")
-
-    # 4. Wire retrieval layer
-    init_retrieval(df, collection, embed_model)
-    print("[startup] Retrieval layer initialized")
+    # 3. Wire retrieval layer (embedding model lazy-loads on first /chat request
+    #    to keep startup fast and stay under the 512 MB free-tier RAM limit)
+    init_retrieval(df, collection, embed_model=None)
+    print("[startup] Retrieval layer initialized (model loads on first query)")
 
     # 5. Validate all required API keys before accepting any requests.
     #    Raises RuntimeError with key NAMES only — never key values.
