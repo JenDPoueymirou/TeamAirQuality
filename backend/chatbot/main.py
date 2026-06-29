@@ -37,8 +37,8 @@ from chatbot.config import (
     AIRNOW_API_KEY,
     PURPLEAIR_API_KEY,
     GEMINI_MODEL,
+    GEMINI_EMBED_MODEL,
     LLM_MAX_TOKENS,
-    EMBED_MODEL,
     CSV_PATH,
     CHROMA_DIR,
     COLLECTION_NAME,
@@ -166,7 +166,19 @@ async def lifespan(app: FastAPI):
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
     print(f"[startup] Loaded {len(df)} rows, {len(df.columns)} columns")
 
-    # 2. Connect to ChromaDB
+    # 2. Validate API keys and init Gemini client before anything else needs them
+    key_status = safe_config_summary()
+    missing = [name for name, present in key_status.items() if not present]
+    if missing:
+        raise RuntimeError(
+            f"Required API key(s) not found: {', '.join(missing)}. "
+            "Add them to backend/.env and restart the server."
+        )
+    print(f"[startup] API keys present: {list(key_status.keys())}")
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    print(f"[startup] Gemini client ready — chat: {GEMINI_MODEL}, embed: {GEMINI_EMBED_MODEL}")
+
+    # 3. Connect to ChromaDB
     print(f"[startup] Connecting to ChromaDB at {CHROMA_DIR}...")
     if not os.path.exists(CHROMA_DIR):
         raise RuntimeError(
@@ -177,27 +189,9 @@ async def lifespan(app: FastAPI):
     collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
     print(f"[startup] ChromaDB ready — {collection.count()} vectors")
 
-    # 3. Wire retrieval layer (embedding model lazy-loads on first /chat request
-    #    to keep startup fast and stay under the 512 MB free-tier RAM limit)
-    init_retrieval(df, collection, embed_model=None)
-    print("[startup] Retrieval layer initialized (model loads on first query)")
-
-    # 5. Validate all required API keys before accepting any requests.
-    #    Raises RuntimeError with key NAMES only — never key values.
-    #    GEMINI_API_KEY  : LLM calls (/chat)
-    #    AIRNOW_API_KEY  : data ingestion (src/dataingestion.py)
-    #    PURPLEAIR_API_KEY: data ingestion (src/dataingestion.py)
-    key_status = safe_config_summary()
-    missing = [name for name, present in key_status.items() if not present]
-    if missing:
-        raise RuntimeError(
-            f"Required API key(s) not found: {', '.join(missing)}. "
-            "Add them to backend/.env and restart the server."
-        )
-    print(f"[startup] API keys present: {list(key_status.keys())}")
-
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    print(f"[startup] Gemini client ready — model: {GEMINI_MODEL}")
+    # 4. Wire retrieval layer
+    init_retrieval(df, collection, gemini_client)
+    print("[startup] Retrieval layer initialized")
 
     # 6. Ensure logs directory exists
     os.makedirs("logs", exist_ok=True)
@@ -378,7 +372,7 @@ async def health():
         "status": "ok",
         "csv_rows": len(df) if df is not None else 0,
         "csv_columns": len(df.columns) if df is not None else 0,
-        "embed_model": EMBED_MODEL,
+        "embed_model": GEMINI_EMBED_MODEL,
         "llm_model": GEMINI_MODEL,
         "llm_provider": "Google Gemini (free tier)",
         "requests_today": get_today_count(),

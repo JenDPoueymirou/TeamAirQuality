@@ -18,9 +18,9 @@ import pandas as pd
 
 # Import shared constants so this stays in sync with the chatbot layer.
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from chatbot.config import CHROMA_DIR, COLLECTION_NAME, CSV_PATH, EMBED_MODEL
+from chatbot.config import CHROMA_DIR, COLLECTION_NAME, CSV_PATH, GEMINI_API_KEY, GEMINI_EMBED_MODEL
 
-BATCH_SIZE = 128
+BATCH_SIZE = 100  # Gemini embed_content accepts up to 100 texts per call
 
 
 # ── text conversion ───────────────────────────────────────────────────────────
@@ -122,10 +122,13 @@ def _build_metadata(row: dict) -> dict:
 def main() -> None:
     try:
         import chromadb
-        from sentence_transformers import SentenceTransformer
+        from google import genai
     except ImportError as exc:
         print(f"[error] Missing dependency: {exc}")
-        print("  Run: pip install sentence-transformers chromadb")
+        sys.exit(1)
+
+    if not GEMINI_API_KEY:
+        print("[error] GEMINI_API_KEY not set — required for embedding")
         sys.exit(1)
 
     print("Vector ingest\n")
@@ -139,19 +142,20 @@ def main() -> None:
     df = pd.read_csv(csv_path).drop_duplicates()
     print(f"  [ok]   Loaded {len(df):,} rows from {csv_path}")
 
-    # convert NaN → None so _present() and _build_metadata() work cleanly
     rows = df.where(df.notna(), other=None).to_dict(orient="records")
 
-    # embedding model (~80 MB download on first run, cached to ~/.cache after)
-    print(f"  Loading embedding model {EMBED_MODEL!r}...")
-    model = SentenceTransformer(EMBED_MODEL)
-    print("  [ok]   Model loaded")
+    gemini = genai.Client(api_key=GEMINI_API_KEY)
+    print(f"  [ok]   Gemini embed client ready ({GEMINI_EMBED_MODEL})")
 
-    # ChromaDB persistent store
+    # ChromaDB persistent store — always recreate so dimension stays consistent
     chroma_dir = Path(CHROMA_DIR)
     chroma_dir.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(chroma_dir))
-    collection = client.get_or_create_collection(name=COLLECTION_NAME)
+    chroma = chromadb.PersistentClient(path=str(chroma_dir))
+    try:
+        chroma.delete_collection(name=COLLECTION_NAME)
+    except Exception:
+        pass
+    collection = chroma.create_collection(name=COLLECTION_NAME)
     print(f"  [ok]   ChromaDB collection {COLLECTION_NAME!r} at {chroma_dir}\n")
 
     # batch embed + upsert
@@ -162,12 +166,12 @@ def main() -> None:
     for i in range(n_batches):
         batch = rows[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]
 
-        texts      = [row_to_text(r) for r in batch]
-        ids        = [stable_id(r) for r in batch]
-        metadatas  = [_build_metadata(r) for r in batch]
-        embeddings = model.encode(
-            texts, batch_size=BATCH_SIZE, show_progress_bar=False
-        ).tolist()
+        texts     = [row_to_text(r) for r in batch]
+        ids       = [stable_id(r) for r in batch]
+        metadatas = [_build_metadata(r) for r in batch]
+
+        result = gemini.models.embed_content(model=GEMINI_EMBED_MODEL, contents=texts)
+        embeddings = [e.values for e in result.embeddings]
 
         collection.upsert(
             ids=ids,

@@ -17,6 +17,7 @@ import pandas as pd
 
 from chatbot.config import (
     BOROUGHS,
+    GEMINI_EMBED_MODEL,
     STRUCT_K,
     TOP_K,
     UHF_NEIGHBORHOODS,
@@ -29,19 +30,19 @@ log = logging.getLogger(__name__)
 # Module-level state — populated once at startup by init_retrieval().
 _df: pd.DataFrame = pd.DataFrame()
 _collection = None
-_embed_model = None
+_gemini_client = None
 
 
-def init_retrieval(df: pd.DataFrame, collection, embed_model) -> None:
+def init_retrieval(df: pd.DataFrame, collection, gemini_client) -> None:
     """
     Store data dependencies in module state.
     Called once from main.py lifespan so retrieve() needs no arguments
     beyond the query string.
     """
-    global _df, _collection, _embed_model
+    global _df, _collection, _gemini_client
     _df = df
     _collection = collection
-    _embed_model = embed_model
+    _gemini_client = gemini_client
 
 
 # ── Intent extraction ──────────────────────────────────────────────────────────
@@ -135,21 +136,9 @@ def structured_filter(filters: dict, top_n: int = STRUCT_K) -> list[dict]:
 
 # ── Semantic search ────────────────────────────────────────────────────────────
 
-def _get_embed_model():
-    """Load the embedding model on first use (lazy) to keep startup fast."""
-    global _embed_model
-    if _embed_model is None:
-        from sentence_transformers import SentenceTransformer
-        from chatbot.config import EMBED_MODEL as _EMBED_MODEL
-        log.info("Loading embedding model '%s' on first query...", _EMBED_MODEL)
-        _embed_model = SentenceTransformer(_EMBED_MODEL)
-        log.info("Embedding model ready")
-    return _embed_model
-
-
 def vector_search(query: str, filters: dict, top_k: int = VECTOR_K) -> list[dict]:
     """
-    Embed the query locally with sentence-transformers, then query ChromaDB
+    Embed the query with Gemini text-embedding-004, then query ChromaDB
     for the most semantically similar stored rows.
 
     Applies a borough pre-filter using Chroma's where= clause when one or
@@ -157,13 +146,16 @@ def vector_search(query: str, filters: dict, top_k: int = VECTOR_K) -> list[dict
 
     Returns [] on any error — semantic search is non-fatal.
     """
-    if _collection is None:
-        log.warning("Semantic search unavailable — collection not loaded")
+    if _collection is None or _gemini_client is None:
+        log.warning("Semantic search unavailable — collection or Gemini client not loaded")
         return []
 
     try:
-        embed_model = _get_embed_model()
-        query_vector = embed_model.encode([query]).tolist()
+        result = _gemini_client.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=query,
+        )
+        query_vector = [result.embeddings[0].values]
 
         where = None
         if "borough" in filters:

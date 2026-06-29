@@ -24,8 +24,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
 
-# ── Local embedding model ──────────────────────────────────────────────────────
-EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
+# ── Embedding model (Gemini API — no local model, no PyTorch) ─────────────────
+GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "text-embedding-004")
 
 # ── File paths ─────────────────────────────────────────────────────────────────
 CSV_PATH        = os.getenv("CSV_PATH",   "data/merged_final.csv")
