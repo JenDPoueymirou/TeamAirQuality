@@ -20,7 +20,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from chatbot.config import CHROMA_DIR, COLLECTION_NAME, CSV_PATH, GEMINI_API_KEY, GEMINI_EMBED_MODEL
 
-BATCH_SIZE = 100  # Gemini embed_content accepts up to 100 texts per call
+BATCH_SIZE = 500  # rows per ChromaDB upsert call
 
 
 # ── text conversion ───────────────────────────────────────────────────────────
@@ -119,10 +119,32 @@ def _build_metadata(row: dict) -> dict:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+EMBED_URL = (
+    "https://generativelanguage.googleapis.com"
+    f"/v1beta/models/{{}}"
+    ":embedContent"
+)
+
+
+def _embed(text: str, api_key: str, model: str) -> list[float]:
+    """Call the Gemini embedContent REST endpoint directly.
+    Bypasses the google-genai SDK to avoid version-specific bugs with embed_content.
+    """
+    import requests as _requests
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"
+    r = _requests.post(
+        url,
+        json={"content": {"parts": [{"text": text}]}},
+        headers={"x-goog-api-key": api_key},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["embedding"]["values"]
+
+
 def main() -> None:
     try:
         import chromadb
-        from google import genai
     except ImportError as exc:
         print(f"[error] Missing dependency: {exc}")
         sys.exit(1)
@@ -143,10 +165,7 @@ def main() -> None:
     print(f"  [ok]   Loaded {len(df):,} rows from {csv_path}")
 
     rows = df.where(df.notna(), other=None).to_dict(orient="records")
-
-    # text-embedding-004 is only available on the v1 (stable) API, not v1beta
-    gemini = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1"})
-    print(f"  [ok]   Gemini embed client ready ({GEMINI_EMBED_MODEL})")
+    print(f"  [ok]   Embedding model: {GEMINI_EMBED_MODEL} (via REST API)")
 
     # ChromaDB persistent store — always recreate so dimension stays consistent
     chroma_dir = Path(CHROMA_DIR)
@@ -159,30 +178,36 @@ def main() -> None:
     collection = chroma.create_collection(name=COLLECTION_NAME)
     print(f"  [ok]   ChromaDB collection {COLLECTION_NAME!r} at {chroma_dir}\n")
 
-    # batch embed + upsert
+    # Embed row by row via REST, then upsert to ChromaDB in batches.
     total = len(rows)
+    print(f"Embedding {total:,} rows via Gemini REST API...\n")
+
+    all_texts:      list[str]         = []
+    all_ids:        list[str]         = []
+    all_metadatas:  list[dict]        = []
+    all_embeddings: list[list[float]] = []
+
+    for i, row in enumerate(rows):
+        text = row_to_text(row)
+        all_texts.append(text)
+        all_ids.append(stable_id(row))
+        all_metadatas.append(_build_metadata(row))
+        all_embeddings.append(_embed(text, GEMINI_API_KEY, GEMINI_EMBED_MODEL))
+
+        if (i + 1) % 100 == 0 or (i + 1) == total:
+            print(f"  {i + 1:>5,}/{total:,} rows embedded")
+
+    # upsert to ChromaDB in batches of BATCH_SIZE
     n_batches = math.ceil(total / BATCH_SIZE)
-    print(f"Embedding {total:,} rows in {n_batches} batches of {BATCH_SIZE}...\n")
-
     for i in range(n_batches):
-        batch = rows[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]
-
-        texts     = [row_to_text(r) for r in batch]
-        ids       = [stable_id(r) for r in batch]
-        metadatas = [_build_metadata(r) for r in batch]
-
-        result = gemini.models.embed_content(model=GEMINI_EMBED_MODEL, contents=texts)
-        embeddings = [e.values for e in result.embeddings]
-
+        start = i * BATCH_SIZE
+        end   = min(start + BATCH_SIZE, total)
         collection.upsert(
-            ids=ids,
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas,
+            ids=all_ids[start:end],
+            documents=all_texts[start:end],
+            embeddings=all_embeddings[start:end],
+            metadatas=all_metadatas[start:end],
         )
-
-        done = min((i + 1) * BATCH_SIZE, total)
-        print(f"  batch {i + 1:>3}/{n_batches}  [{done:>5,}/{total:,} rows]")
 
     print(f"\n  Total vectors in collection: {collection.count():,}")
     print("\nDone.")

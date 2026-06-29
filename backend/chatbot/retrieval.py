@@ -34,15 +34,23 @@ _gemini_client = None       # chat client passed from main.py (kept for availabi
 _gemini_embed_client = None  # separate v1 client for text-embedding-004
 
 
-def _get_embed_client():
-    """Return (or lazily create) a Gemini client pinned to the v1 API.
-    text-embedding-004 is not available on the default v1beta endpoint."""
-    global _gemini_embed_client
-    if _gemini_embed_client is None:
-        from google import genai
-        from chatbot.config import GEMINI_API_KEY as _key
-        _gemini_embed_client = genai.Client(api_key=_key, http_options={"api_version": "v1"})
-    return _gemini_embed_client
+def _embed_query(query: str) -> list[float]:
+    """Embed a single query string via the Gemini embedContent REST endpoint.
+    Uses requests directly to avoid google-genai SDK version quirks."""
+    import requests as _req
+    from chatbot.config import GEMINI_API_KEY as _key
+    url = (
+        f"https://generativelanguage.googleapis.com"
+        f"/v1beta/models/{GEMINI_EMBED_MODEL}:embedContent"
+    )
+    r = _req.post(
+        url,
+        json={"content": {"parts": [{"text": query}]}},
+        headers={"x-goog-api-key": _key},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["embedding"]["values"]
 
 
 def init_retrieval(df: pd.DataFrame, collection, gemini_client) -> None:
@@ -163,11 +171,7 @@ def vector_search(query: str, filters: dict, top_k: int = VECTOR_K) -> list[dict
         return []
 
     try:
-        result = _get_embed_client().models.embed_content(
-            model=GEMINI_EMBED_MODEL,
-            contents=query,
-        )
-        query_vector = [result.embeddings[0].values]
+        query_vector = [_embed_query(query)]
 
         where = None
         if "borough" in filters:

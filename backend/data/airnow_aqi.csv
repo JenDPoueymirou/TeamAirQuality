@@ -1,0 +1,11 @@
+DateObserved,HourObserved,LocalTimeZone,ReportingArea,StateCode,Latitude,Longitude,ParameterName,AQI,query_zip,category_Number,category_Name
+2026-06-29,9,EST,New York City Region,NY,40.8419,-73.8359,O3,38,10001,1,Good
+2026-06-29,9,EST,New York City Region,NY,40.8419,-73.8359,PM2.5,63,10001,2,Moderate
+2026-06-29,9,EST,New York City Region,NY,40.8419,-73.8359,O3,38,10451,1,Good
+2026-06-29,9,EST,New York City Region,NY,40.8419,-73.8359,PM2.5,63,10451,2,Moderate
+2026-06-29,9,EST,Northeast Urban,NJ,40.692,-74.187,O3,27,11201,1,Good
+2026-06-29,9,EST,Northeast Urban,NJ,40.692,-74.187,PM2.5,61,11201,2,Moderate
+2026-06-29,9,EST,New York City Region,NY,40.8419,-73.8359,O3,38,11354,1,Good
+2026-06-29,9,EST,New York City Region,NY,40.8419,-73.8359,PM2.5,63,11354,2,Moderate
+2026-06-29,9,EST,Northeast Urban,NJ,40.692,-74.187,O3,27,10301,1,Good
+2026-06-29,9,EST,Northeast Urban,NJ,40.692,-74.187,PM2.5,61,10301,2,Moderate
