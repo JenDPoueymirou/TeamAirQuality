@@ -29,20 +29,14 @@ WORKDIR /app
 # Application source
 COPY chatbot/ chatbot/
 COPY src/     src/
+COPY start.sh .
 
-# Pre-generated dataset and ChromaDB vector store.
-# Build these locally before running docker build:
-#   python src/dataingestion.py
-#   python src/datamerge.py
-#   python src/ingest.py
-COPY data/ data/
-
-# Logs directory — runtime writes go here; mount a volume to persist across restarts
-RUN mkdir -p logs
+# Logs and data directories — data is populated at container startup by start.sh
+RUN mkdir -p logs data && chmod +x start.sh
 
 EXPOSE 8000
 
 # API keys must be injected at runtime — never baked into the image.
 # Run with:  docker run --env-file .env -p 8000:8000 nyc-air-quality-chatbot
 # Or pass individually: -e GEMINI_API_KEY=... -e AIRNOW_API_KEY=... -e PURPLEAIR_API_KEY=...
-CMD ["uvicorn", "chatbot.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["bash", "start.sh"]
