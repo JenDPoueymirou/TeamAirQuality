@@ -144,7 +144,8 @@ def main() -> None:
 
     rows = df.where(df.notna(), other=None).to_dict(orient="records")
 
-    gemini = genai.Client(api_key=GEMINI_API_KEY)
+    # text-embedding-004 is only available on the v1 (stable) API, not v1beta
+    gemini = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1"})
     print(f"  [ok]   Gemini embed client ready ({GEMINI_EMBED_MODEL})")
 
     # ChromaDB persistent store — always recreate so dimension stays consistent

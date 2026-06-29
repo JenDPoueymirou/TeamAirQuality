@@ -30,7 +30,19 @@ log = logging.getLogger(__name__)
 # Module-level state — populated once at startup by init_retrieval().
 _df: pd.DataFrame = pd.DataFrame()
 _collection = None
-_gemini_client = None
+_gemini_client = None       # chat client passed from main.py (kept for availability check)
+_gemini_embed_client = None  # separate v1 client for text-embedding-004
+
+
+def _get_embed_client():
+    """Return (or lazily create) a Gemini client pinned to the v1 API.
+    text-embedding-004 is not available on the default v1beta endpoint."""
+    global _gemini_embed_client
+    if _gemini_embed_client is None:
+        from google import genai
+        from chatbot.config import GEMINI_API_KEY as _key
+        _gemini_embed_client = genai.Client(api_key=_key, http_options={"api_version": "v1"})
+    return _gemini_embed_client
 
 
 def init_retrieval(df: pd.DataFrame, collection, gemini_client) -> None:
@@ -146,12 +158,12 @@ def vector_search(query: str, filters: dict, top_k: int = VECTOR_K) -> list[dict
 
     Returns [] on any error — semantic search is non-fatal.
     """
-    if _collection is None or _gemini_client is None:
-        log.warning("Semantic search unavailable — collection or Gemini client not loaded")
+    if _collection is None:
+        log.warning("Semantic search unavailable — collection not loaded")
         return []
 
     try:
-        result = _gemini_client.models.embed_content(
+        result = _get_embed_client().models.embed_content(
             model=GEMINI_EMBED_MODEL,
             contents=query,
         )
