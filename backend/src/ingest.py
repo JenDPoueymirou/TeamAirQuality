@@ -12,6 +12,7 @@ Idempotent: re-running produces the same vector count (stable IDs).
 import hashlib
 import math
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -20,7 +21,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from chatbot.config import CHROMA_DIR, COLLECTION_NAME, CSV_PATH, GEMINI_API_KEY, GEMINI_EMBED_MODEL
 
-BATCH_SIZE = 500  # rows per ChromaDB upsert call
+CHROMA_BATCH = 500   # rows per ChromaDB upsert call
+EMBED_BATCH  = 100   # texts per batchEmbedContents call (Gemini free tier: 100 RPM)
 
 
 # ── text conversion ───────────────────────────────────────────────────────────
@@ -119,27 +121,39 @@ def _build_metadata(row: dict) -> dict:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-EMBED_URL = (
-    "https://generativelanguage.googleapis.com"
-    f"/v1beta/models/{{}}"
-    ":embedContent"
-)
-
-
-def _embed(text: str, api_key: str, model: str) -> list[float]:
-    """Call the Gemini embedContent REST endpoint directly.
-    Bypasses the google-genai SDK to avoid version-specific bugs with embed_content.
+def _embed_batch(texts: list[str], api_key: str, model: str, retries: int = 5) -> list[list[float]]:
     """
-    import requests as _requests
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"
-    r = _requests.post(
-        url,
-        json={"content": {"parts": [{"text": text}]}},
-        headers={"x-goog-api-key": api_key},
-        timeout=30,
+    Embed multiple texts in one batchEmbedContents call.
+    Retries automatically on 429 using the delay suggested by the API.
+    One batch call = up to 100 texts, so 2,267 rows needs only ~23 API calls.
+    """
+    import re as _re
+    import requests as _req
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set in .env")
+    url = (
+        f"https://generativelanguage.googleapis.com"
+        f"/v1beta/models/{model}:batchEmbedContents"
     )
-    r.raise_for_status()
-    return r.json()["embedding"]["values"]
+    body = {
+        "requests": [
+            {"model": f"models/{model}", "content": {"parts": [{"text": t}]}}
+            for t in texts
+        ]
+    }
+    for attempt in range(retries):
+        r = _req.post(url, json=body, headers={"x-goog-api-key": api_key}, timeout=60)
+        if r.status_code == 429:
+            m = _re.search(r"retry in (\d+(?:\.\d+)?)s", r.text)
+            delay = max(float(m.group(1)) + 5, 65) if m else 65
+            print(f"  [rate limit] sleeping {delay:.0f}s before retry {attempt + 1}/{retries}…")
+            time.sleep(delay)
+            continue
+        if not r.ok:
+            print(f"\n  [API ERROR] {r.status_code} — {r.text[:500]}")
+        r.raise_for_status()
+        return [e["values"] for e in r.json()["embeddings"]]
+    raise RuntimeError(f"Embedding failed after {retries} retries")
 
 
 def main() -> None:
@@ -178,30 +192,36 @@ def main() -> None:
     collection = chroma.create_collection(name=COLLECTION_NAME)
     print(f"  [ok]   ChromaDB collection {COLLECTION_NAME!r} at {chroma_dir}\n")
 
-    # Embed row by row via REST, then upsert to ChromaDB in batches.
+    # Build text/id/metadata lists first (no API calls yet)
     total = len(rows)
-    print(f"Embedding {total:,} rows via Gemini REST API...\n")
-
     all_texts:      list[str]         = []
     all_ids:        list[str]         = []
     all_metadatas:  list[dict]        = []
     all_embeddings: list[list[float]] = []
 
-    for i, row in enumerate(rows):
-        text = row_to_text(row)
-        all_texts.append(text)
+    for row in rows:
+        all_texts.append(row_to_text(row))
         all_ids.append(stable_id(row))
         all_metadatas.append(_build_metadata(row))
-        all_embeddings.append(_embed(text, GEMINI_API_KEY, GEMINI_EMBED_MODEL))
 
-        if (i + 1) % 100 == 0 or (i + 1) == total:
-            print(f"  {i + 1:>5,}/{total:,} rows embedded")
+    # Batch-embed: up to 100 texts per API call (~23 calls for 2,267 rows)
+    n_embed_batches = math.ceil(total / EMBED_BATCH)
+    print(f"Embedding {total:,} rows in {n_embed_batches} batch calls via Gemini REST API...\n")
 
-    # upsert to ChromaDB in batches of BATCH_SIZE
-    n_batches = math.ceil(total / BATCH_SIZE)
-    for i in range(n_batches):
-        start = i * BATCH_SIZE
-        end   = min(start + BATCH_SIZE, total)
+    for i in range(n_embed_batches):
+        start = i * EMBED_BATCH
+        end   = min(start + EMBED_BATCH, total)
+        batch_embeddings = _embed_batch(
+            all_texts[start:end], GEMINI_API_KEY, GEMINI_EMBED_MODEL
+        )
+        all_embeddings.extend(batch_embeddings)
+        print(f"  {end:>5,}/{total:,} rows embedded")
+
+    # Upsert to ChromaDB in batches of CHROMA_BATCH
+    n_chroma_batches = math.ceil(total / CHROMA_BATCH)
+    for i in range(n_chroma_batches):
+        start = i * CHROMA_BATCH
+        end   = min(start + CHROMA_BATCH, total)
         collection.upsert(
             ids=all_ids[start:end],
             documents=all_texts[start:end],
