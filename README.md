@@ -54,7 +54,59 @@ Gemini 2.0 Flash free tier: **1,500 requests/day · 15 requests/minute · 1 mill
 
 ---
 
-## Setup — Run These Steps in Order
+## Setup
+
+Two paths: **Docker** (recommended for demos) or **local Python** (recommended for development).
+
+---
+
+### Option A — Docker
+
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+
+```bash
+# 1. Clone the repo
+git clone <repo-url>
+cd TeamAirQuality
+
+# 2. Configure environment variables
+cp backend/.env.example backend/.env
+# Open backend/.env and fill in your three API keys:
+#   GEMINI_API_KEY=AIza...   ← from aistudio.google.com
+#   AIRNOW_API_KEY=...
+#   PURPLEAIR_API_KEY=...
+
+# 3. Generate the dataset — runs Python locally once to produce data/ files
+#    (Docker bakes these into the image so the container needs no internet access)
+cd backend
+python src/dataingestion.py     # ~2 minutes — fetches from NYC Open Data + APIs
+python src/datamerge.py         # <10 seconds — merges into merged_final.csv
+python src/ingest.py            # ~3 minutes — embeds rows into ChromaDB
+cd ..
+
+# 4. Build the image
+#    The builder stage pre-downloads the sentence-transformers model weights
+#    so the first /chat request has no cold-start latency.
+docker build -t nyc-air-quality-chatbot backend/
+
+# 5. Run the container — secrets injected at runtime, never baked into the image
+docker run --env-file backend/.env -p 8000:8000 nyc-air-quality-chatbot
+```
+
+The server starts at `http://localhost:8000`. Interactive API docs: `http://localhost:8000/docs`
+
+To persist usage logs across container restarts:
+
+```bash
+docker run --env-file backend/.env \
+  -p 8000:8000 \
+  -v "$(pwd)/backend/logs:/app/logs" \
+  nyc-air-quality-chatbot
+```
+
+---
+
+### Option B — Local Python
 
 All commands run from the `backend/` directory.
 
@@ -156,6 +208,10 @@ MVP is considered working at **10/15 questions passed**.
 | `RuntimeError: ChromaDB not found` | Ingest hasn't run | Run step 7 (`src/ingest.py`) |
 | HTTP 429 from `/chat` | Hit 15 req/min free-tier limit | Wait 60 seconds and retry |
 | `ModuleNotFoundError` on startup | Virtual environment not activated | Run `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (Mac/Linux) |
+| Docker: `RuntimeError: CSV not found` | `data/` wasn't built before `docker build` | Run `src/dataingestion.py`, `datamerge.py`, `ingest.py` locally first, then rebuild |
+| Docker: `RuntimeError: GEMINI_API_KEY not found` | `--env-file` flag missing from `docker run` | Use `docker run --env-file backend/.env ...` — never copy `.env` into the image |
+| Docker: port already in use | Something else is on 8000 | Use `-p 8001:8000` and hit `localhost:8001` instead |
+| Docker: stale data after re-ingestion | Image still has the old `data/` baked in | Re-run `docker build` after regenerating data files |
 
 ---
 
@@ -183,7 +239,9 @@ TeamAirQuality/
     │   └── .chroma/
     ├── logs/                  # Generated — usage.csv written by /chat
     ├── .env.example           # Copy to .env and fill in keys
-    └── requirements.txt
+    ├── requirements.txt
+    ├── Dockerfile             # Two-stage build: deps + pre-downloaded model
+    └── .dockerignore          # Excludes .env, logs/, __pycache__, evals/
 ```
 
 ---
